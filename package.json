@@ -1,0 +1,20 @@
+{
+  "name": "kgf-explorer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A browser client over the KGF API: deterministic operations as buttons, and the same operations as a bring-your-own-model chat's tools.",
+  "scripts": {
+    "build": "./build.sh",
+    "serve": "python3 serve.py 8765"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "@duckdb/duckdb-wasm": "1.32.0",
+    "dompurify": "^3.4.16",
+    "markdown-it": "^15.0.2",
+    "openai": "^7.23.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

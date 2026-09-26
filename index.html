@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KGF Explorer</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc;
+    --accent: #2f5d8a; --accent-ink: #ffffff; --ok: #2e7d4f; --warn: #a15c00; --bad: #b3261e;
+    --code: #f0efe9; --user: #e8eef5; --ai: #f3f0e8;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161614; --panel: #1f1f1c; --ink: #e9e8e3; --muted: #9a998f; --line: #34332e;
+      --accent: #7aa7d6; --accent-ink: #10202f; --ok: #6cc08f; --warn: #e0a24a; --bad: #f08a80;
+      --code: #2a2925; --user: #22303d; --ai: #2b2922;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans); }
+  header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  header input { width: 280px; max-width: 100%; }
+  #status { color: var(--muted); }
+  main { display: grid; grid-template-columns: 290px minmax(0, 1fr) 380px; gap: 12px; padding: 12px 16px; height: calc(100vh - 56px); }
+  /* One side panel may be hidden, never both; the one that stays widens, the results take the rest. */
+  main.hide-ops { grid-template-columns: minmax(0, 1fr) minmax(420px, 42%); }
+  main.hide-chat { grid-template-columns: minmax(320px, 32%) minmax(0, 1fr); }
+  main.hide-ops #ops, main.hide-chat #chat { display: none; }
+  .panels { margin-left: auto; display: flex; gap: 4px; }
+  .panels button { padding: 3px 10px; font-size: 12.5px; }
+  .panels button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .panels button[aria-pressed="false"] { color: var(--muted); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; min-height: 0; }
+  h2 { font-size: 14px; margin: 0 0 8px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  h2 code { font-weight: normal; color: var(--muted); font-size: 12px; word-break: break-all; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 6px; }
+  label { display: block; margin: 8px 0; }
+  label > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+  label em { font-style: normal; opacity: .7; }
+  input, select, textarea, button { font: inherit; color: inherit; }
+  input, select, textarea { width: 100%; padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); }
+  button { padding: 5px 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .budget { display: grid; grid-template-columns: 1fr 1fr; gap: 0 8px; }
+  .hint { font-size: 12px; color: var(--muted); }
+  .meta .warn { color: var(--warn); }
+  td .t-label { color: var(--muted); margin-left: 6px; font-size: 11.5px; }
+  td .t-label::before { content: '· '; }
+  #op-desc { font-size: 12px; color: var(--muted); margin: 6px 0; }
+  #tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
+  .tab { padding: 3px 8px; font-size: 12px; }
+  .tab.on { border-color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+  .tab.error { color: var(--bad); } .tab.aborted { color: var(--warn); }
+  .who { font-size: 10px; margin-left: 4px; padding: 0 4px; border-radius: 3px; background: var(--ai); border: 1px solid var(--line); }
+  .meta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid currentColor; }
+  .badge.complete { color: var(--ok); } .badge.aborted { color: var(--warn); } .badge.error { color: var(--bad); } .badge.running { color: var(--muted); }
+  details { margin: 4px 0; } summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+  pre { background: var(--code); padding: 8px; border-radius: 5px; overflow: auto; font: 12px/1.4 var(--mono); max-height: 360px; margin: 6px 0; }
+  pre.doc { white-space: pre-wrap; max-height: none; font-family: var(--sans); font-size: 13px; }
+  pre.error { color: var(--bad); white-space: pre-wrap; }
+  .grid { overflow: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { position: sticky; top: 0; background: var(--panel); font-weight: 600; }
+  td a { color: var(--accent); text-decoration: none; overflow-wrap: break-word; }
+  td a:hover { text-decoration: underline; }
+  td .lit { word-break: break-word; }
+  sub { color: var(--muted); margin-left: 3px; }
+  .empty { color: var(--muted); }
+  ol.log { padding-left: 22px; font-size: 12.5px; } ol.log li { margin: 4px 0; } ol.log code { color: var(--muted); word-break: break-all; }
+  .who2 { margin-left: 8px; font-size: 11px; color: var(--muted); }
+  #chat { display: flex; flex-direction: column; gap: 8px; }
+  #chat details.settings { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  #transcript { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 6px; min-height: 120px; }
+  .msg { padding: 7px 9px; border-radius: 7px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { background: var(--user); align-self: flex-end; max-width: 90%; }
+  .msg.assistant { background: var(--ai); white-space: normal; }
+  .msg.assistant > :first-child { margin-top: 0; }
+  .msg.assistant > :last-child { margin-bottom: 0; }
+  .msg.assistant p { margin: 0 0 .55em; }
+  .msg.assistant ul, .msg.assistant ol { margin: .25em 0 .55em; padding-left: 1.3em; }
+  .msg.assistant li { margin: .15em 0; }
+  .msg.assistant li > p { margin: 0; }
+  .msg.assistant h1, .msg.assistant h2, .msg.assistant h3, .msg.assistant h4 { font-size: 1em; margin: .7em 0 .3em; }
+  .msg.assistant code { font: 12px/1.4 var(--mono); background: var(--code); padding: 0 3px; border-radius: 3px; overflow-wrap: anywhere; }
+  .msg.assistant pre { margin: .4em 0; max-height: 240px; }
+  .msg.assistant pre code { padding: 0; background: none; }
+  .msg.assistant blockquote { margin: .4em 0; padding-left: .7em; border-left: 2px solid var(--line); color: var(--muted); }
+  .msg.assistant table { width: auto; margin: .4em 0; font-size: 12.5px; }
+  .msg.assistant th, .msg.assistant td { padding: 2px 8px; }
+  .msg.assistant th { position: static; background: none; }
+  .msg.assistant a { color: var(--accent); overflow-wrap: anywhere; }
+  .msg.assistant hr { border: 0; border-top: 1px solid var(--line); margin: .6em 0; }
+  a.tref { font-weight: 600; text-decoration: none; }
+  .msg.tool { font-size: 12px; color: var(--muted); padding: 3px 9px; border-left: 2px solid var(--accent); border-radius: 0; }
+  .msg.tool code { word-break: break-all; }
+  .msg.tool a { color: var(--accent); }
+  .msg.notice { font-size: 12px; color: var(--warn); }
+  #prompt { resize: vertical; min-height: 60px; }
+  #op-form textarea { font: 12px/1.4 var(--mono); resize: vertical; }
+  @media (max-width: 1100px) {
+    main, main.hide-ops, main.hide-chat { grid-template-columns: 1fr; height: auto; }
+    section { max-height: none; }
+    #transcript { max-height: 60vh; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>KGF Explorer</h1>
+  <input id="origin" value="https://apps.okn.us/kgf" aria-label="KGF endpoint">
+  <button id="connect">Connect</button>
+  <span id="status">Loading the query engine …</span>
+  <div class="panels" role="group" aria-label="Panels">
+    <button id="toggle-ops" aria-controls="ops" aria-pressed="true">Operations</button>
+    <button id="toggle-chat" aria-controls="chat" aria-pressed="true">Chat</button>
+  </div>
+</header>
+<main>
+  <section id="ops">
+    <h3 style="margin-top:0">Operation</h3>
+    <select id="op" aria-label="Operation"></select>
+    <p id="op-desc"></p>
+    <form id="op-form" onsubmit="return false"></form>
+    <div class="row"><button id="run" class="primary">Run</button><button id="stop" disabled>Stop</button></div>
+    <h3>Budget, per run</h3>
+    <div class="budget">
+      <label><span>requests</span><input id="b-requests" type="number" value="2000" min="1"></label>
+      <label><span>MiB received</span><input id="b-bytes" type="number" value="128" min="1"></label>
+      <label><span>rows kept</span><input id="b-rows" type="number" value="100000" min="1"></label>
+      <label><span>seconds</span><input id="b-timeout" type="number" value="60" min="1"></label>
+      <label><span>model turns per message</span><input id="b-turns" type="number" value="50" min="1"></label>
+    </div>
+    <p class="hint">A run that hits a budget stops, keeps what arrived, and says so in its receipt. The same budget binds the model's calls. A message that reaches its model turns gets one last turn without tools, to answer from what it has.</p>
+    <p class="hint">Templates are planned in this tab by Comunica with kgf-sparql's KGF actors; fetch goes straight to the KGF API; sql runs in DuckDB-Wasm over this session's tables and can read nothing else. Nothing is hosted: requests go from this page to the endpoint.</p>
+  </section>
+  <section>
+    <div id="tabs"></div>
+    <div id="view"></div>
+  </section>
+  <section id="chat">
+    <details class="settings" open>
+      <summary>Model — bring your own</summary>
+      <label><span>provider</span><select id="provider"></select></label>
+      <label id="base-row"><span>base URL</span><input id="base" spellcheck="false"></label>
+      <label><span>model</span><input id="model" spellcheck="false"></label>
+      <label><span>API key — sent only to the provider above</span><input id="key" type="password" autocomplete="off" spellcheck="false"></label>
+      <label class="row" style="gap:6px"><input id="remember" type="checkbox" style="width:auto"><span style="display:inline;margin:0">remember in this browser</span></label>
+    </details>
+    <div id="transcript"></div>
+    <textarea id="prompt" placeholder="Ask about the graphs — e.g. which genes are associated with asthma, and are any of them studied in GeneLab?"></textarea>
+    <div class="row"><button id="send" class="primary">Send</button><button id="chat-stop" disabled>Stop</button><button id="chat-clear">New chat</button></div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
