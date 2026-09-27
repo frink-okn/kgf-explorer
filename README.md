@@ -41,7 +41,7 @@ which `serve.py` prevents. To deploy, publish `dist/`.
 ## Testing the chat without a key
 
 `python3 test/fake_llm.py` listens on port 8766. It asks for `list_graphs` on every turn
-unless `tool_choice` is `none`, then answers in Markdown that includes two injection attempts,
+unless `tool_choice` is `none`, then answers in Markdown that includes three injection attempts,
 which must come out inert. In the page choose "OpenAI-compatible — custom URL", base URL
 `http://127.0.0.1:8766/v1`, any model name; `GET http://127.0.0.1:8766/log` shows what the page
-sent. The Anthropic branch has the same shape and runs only with a real key.
+sent, and under `fetched` any image the reply made the browser load, which must be none. The Anthropic branch has the same shape and runs only with a real key.

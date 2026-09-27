@@ -6,6 +6,9 @@ import DOMPurify from 'dompurify';
 import MarkdownIt from 'markdown-it';
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: false });
+// No images: the browser loads one without a click, so a reply steered by graph text could
+// carry a table off in its URL. `![x](url)` renders as a link instead.
+md.disable('image');
 
 // Links leave the page in a new tab; the chat and its tables stay where they are.
 const renderLink = md.renderer.rules.link_open ?? ((tokens, i, options, env, self) => self.renderToken(tokens, i, options));

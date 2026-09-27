@@ -3,7 +3,7 @@
 A static page over the KGF API: the operations are buttons, and the same operations are a
 bring-your-own-model chat's tools. Sister to `../kgfq`: it shares kgfq's decisions where the
 same reasoning applies and none of its code. `notes/plan.md` is the design of record; read it
-before changing anything, and the decision (D1–D14) a change touches.
+before changing anything, and the decision (D1–D15) a change touches.
 
 ## Build and run
 
