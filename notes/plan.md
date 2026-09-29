@@ -81,6 +81,11 @@ class-and-predicate's object classes and datatypes, shown to the model whole (up
 The summary card shows only the ten largest classes, which hid SCALES' `Court` (kgf-rs#21);
 object classes and datatypes come back only beneath a class selector (kgf-rs#22).
 
+*2026-09-28:* `list_graphs` is shown whole too. Its 20-row preview held the first 20 of 45
+graphs, alphabetically: qwen3-coder:30b, asked for asthma's IRI in spoke-okn (row 41), said
+there was no such graph and answered from biohealth. Whole, it costs about 3.5k tokens (1.5k
+before).
+
 **D10. Caps from the descriptor, budgets from the visitor.** Page sizes, bindings batches and
 row limits come from the endpoint's descriptor; no number of ours stands in for one. The
 visitor's budget — requests, MiB received, rows kept, seconds, model turns per message — bounds
@@ -148,7 +153,13 @@ asked for an omelet recipe, called `list_graphs` and then wrote the recipe, citi
   out inert. So did a Markdown image (2026-09-26): it renders as a link and was never fetched.
 - A live model: gpt-5.6-sol through an Azure OpenAI deployment and the chat-completions
   adapter (2026-09-26), before and after D15; after it, the model kept to D15's rule.
-  **Not yet checked:** any other live model.
+- Local models for a free default (§3 item 4), 2026-09-28: Ollama 0.30.11 on an M2 Max GPU,
+  32k context, default thinking, through `test/meter_llm.py`; five questions, one run each
+  (the three largest graphs; asthma's genes in spoke-okn, 465; an omelet recipe, D15; asthma's
+  IRI; scales' courts, 94). qwen3.6:27b 5/5, 140 s a question; gemma4:26b-a4b 4/5, 39 s
+  (counted triples naming Court, 100); qwen3-coder:30b 4/5 (ranked the sizes by eye);
+  qwen3.5:9b 2/5 (filled 32k tokens twice, no answer); lfm2.5:8b 1/4 (wrote the recipe). The
+  two that ranked the graphs right did it in `sql`.
 
 ## 3. Open
 
@@ -166,6 +177,18 @@ asked for an omelet recipe, called `list_graphs` and then wrote the recipe, citi
    question); a key for real work. A Cloudflare Workers AI free allocation (10,000 neurons a
    day, shared by all visitors) only if an event needs a hosted default. The more the page
    decides in code, the smaller the model can be.
+
+   *2026-09-28:* A hosted default is wanted after all: a free tier at our expense. That
+   would change §0's "is not hosted", so it is proposed here, not decided. Candidates from §2's
+   trial: gemma4:26b-a4b (MoE, 3.8B active, 16 GB, 4/5) and qwen3.6:27b (dense, 5/5, a GPU's
+   worth of work). Unchecked: timings on the serving hardware, repeat runs, harder questions,
+   thinking off (both turn it off cleanly with `reasoning_effort: "none"`), qwen3.8:27b (needs
+   an Ollama newer than 0.30.11). Calls cannot be limited to this page, since anything it sends
+   can be replayed. The gate is sketched as a proxy in front of the model server, which is never
+   exposed. The proxy pins the page's system prompt and tools by hash and sets the model,
+   `max_tokens` and turns. It gives each visitor a quota, on a token issued after a human
+   check, and keeps a bounded queue on fixed hardware that answers "busy" when full. It accepts
+   an answer only after a tool call: lfm2.5:8b wrote the omelet recipe D15 forbids.
 5. **Claude and ChatGPT as hosts.** Published as a claude.ai artifact, the page could call
    Claude on the viewer's plan through the `sample` capability (unchecked: free plans, and
    whether the sandbox reaches the KGF endpoint). An MCP App would put the operations inside
@@ -173,3 +196,22 @@ asked for an omelet recipe, called `list_graphs` and then wrote the recipe, citi
 6. **Server gaps, filed:** kgf-rs#21 (summary card hides small classes), #22 (`/schema`
    predicate drill empty without a class), #23 (`labels=true` on `/fragment`, `/describe`,
    `/sample`; `/labels` refuses `lang` and `label_source`).
+7. **Page fixes from the local-model trial** (§2, 2026-09-28). The first landed (D9 note);
+   the rest are open.
+   - Done: `list_graphs` is shown whole.
+   - A reply cut off at the context limit (`finish_reason: "length"`) shows nothing and no
+     notice. qwen3.5:9b ended two questions that way. The OpenAI adapter should say so, as
+     D10's budgets do.
+   - `count` with only a class as object counts every triple naming it, not its members:
+     gemma4 answered 100 courts for scales' 94. The description should send a member count to
+     `schema`'s entities or to `count` with `rdf:type`.
+   - Nothing bounds how much of the context tool results take. One `read_table` of 200
+     `describe` rows added about 13k tokens; qwen3.5:9b filled 32k twice. A token budget beside
+     D10's model turns, and a smaller `read_table` limit.
+   - The `sql` description says to CAST for arithmetic. Two models cast triple counts to
+     INTEGER, which overflows at 6 billion, before trying BIGINT. Name BIGINT.
+   - Ranking by eye: qwen3-coder:30b and lfm2.5:8b misread the three largest graphs off the
+     list; the two that answered right sorted in `sql`. A prompt line to rank and count in `sql`
+     is the candidate fix; unchecked.
+   - The trial ran by hand in a browser pane through `test/meter_llm.py`. Item 2's harness
+     should rerun its questions, three times per model.

@@ -170,7 +170,8 @@ export function summarizeForModel(result) {
   } else {
     out.columns = table.variables;
     // A schema listing is shown whole: its point is the small entries a size ranking hides.
-    const shown = table.operation === 'schema' ? SCHEMA_ROWS : PREVIEW_ROWS;
+    // So is the graph list: a preview of it hid spoke-okn, the 41st of 45.
+    const shown = table.operation === 'schema' || table.operation === 'list_graphs' ? SCHEMA_ROWS : PREVIEW_ROWS;
     out.preview = table.rows.slice(0, shown).map(compactRow);
     const labels = labelsFor(table, table.rows.slice(0, shown));
     if (Object.keys(labels).length) {
