@@ -23,10 +23,10 @@ export function renderMarkdown(text) {
 }
 
 /**
- * Turns table ids the reply cites — "(t4)", "t12" — into links that open that table, but only
- * ids of tables that exist, and never inside code or an existing link.
+ * Turns the ids a reply cites — tables "(t4)", or guided handles "s1", "e2" — into links that
+ * open their table, but only ids `resolve` maps to a table, and never inside code or a link.
  */
-export function linkTables(root, isTable, open) {
+export function linkTables(root, resolve, open) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: node => (node.parentElement?.closest('a, code, pre') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
   });
@@ -35,20 +35,20 @@ export function linkTables(root, isTable, open) {
     nodes.push(walker.currentNode);
   }
   for (const node of nodes) {
-    const parts = node.textContent.split(/\b(t\d+)\b/u);
-    if (parts.length === 1 || !parts.some((p, i) => i % 2 === 1 && isTable(p))) {
+    const parts = node.textContent.split(/\b([tesc]\d+)\b/u);
+    if (parts.length === 1 || !parts.some((p, i) => i % 2 === 1 && resolve(p))) {
       continue;
     }
     const fragment = document.createDocumentFragment();
     parts.forEach((part, i) => {
-      if (i % 2 === 1 && isTable(part)) {
+      if (i % 2 === 1 && resolve(part)) {
         const a = document.createElement('a');
         a.href = '#';
         a.className = 'tref';
         a.textContent = part;
         a.addEventListener('click', event => {
           event.preventDefault();
-          open(part);
+          open(resolve(part));
         });
         fragment.append(a);
       } else if (part) {

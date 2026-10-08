@@ -2,6 +2,7 @@
 // and a model's tool call both end in Workspace.run, so the middle column cannot tell them
 // apart except by the actor it records.
 
+import { GUIDED_BY_NAME, GUIDED_SYSTEM, GUIDED_TOOLS, guidedToolsFor } from './guided.js';
 import { Endpoint } from './kgf.js';
 import { DEFAULT_TURNS, PROVIDERS, createChat } from './llm.js';
 import { linkTables, renderMarkdown } from './markdown.js';
@@ -92,7 +93,12 @@ const state = {
   running: null,
   chat: null,
   chatAbort: null,
+  // 'full' (every operation, for a strong model) or 'guided' (D16: handles, for a weaker one).
+  mode: 'full',
 };
+
+const guided = () => state.mode === 'guided';
+const toolNamed = name => (guided() ? GUIDED_BY_NAME : TOOL_BY_NAME).get(name);
 
 function budget() {
   const n = id => Number($(id).value);
@@ -143,12 +149,11 @@ async function connect() {
 
 function renderOperation() {
   const select = $('#op');
-  if (!select.options.length) {
-    for (const t of TOOLS.filter(t => !t.llmOnly)) {
-      select.append(el('option', { value: t.name }, t.title));
-    }
+  if (select.dataset.mode !== state.mode) {
+    select.replaceChildren(...(guided() ? GUIDED_TOOLS : TOOLS.filter(t => !t.llmOnly)).map(t => el('option', { value: t.name }, t.title)));
+    select.dataset.mode = state.mode;
   }
-  const tool = TOOL_BY_NAME.get(select.value);
+  const tool = toolNamed(select.value);
   $('#op-desc').textContent = tool.description;
   const form = $('#op-form');
   form.replaceChildren();
@@ -161,7 +166,8 @@ function renderOperation() {
       input = el('select', { name, multiple: true, size: 5 },
         graphIds.map(id => el('option', { value: id, selected: id === remembered }, id)));
     } else if (name === 'graph') {
-      input = el('select', { name }, graphIds.map(id => el('option', { value: id, selected: id === remembered }, id)));
+      input = el('select', { name }, required ? null : el('option', { value: '' }, '(none)'),
+        graphIds.map(id => el('option', { value: id, selected: required && id === remembered }, id)));
     } else if (prop.enum) {
       input = el('select', { name }, prop.enum.map(v => el('option', { value: v }, v)));
     } else if (prop.type === 'object') {
@@ -276,6 +282,9 @@ function renderTable(table) {
       `labels: ${[ ...table.labels.labels.values() ].filter(Boolean).length} of ${table.labels.labels.size} IRIs, ${table.labels.requests} request${table.labels.requests === 1 ? '' : 's'}`) : null,
   );
   const details = el('div', { class: 'details' });
+  if (table.sparql) {
+    details.append(el('details', { open: true }, el('summary', {}, 'This set as one SPARQL query (written by the page; the page reached it step by step)'), el('pre', {}, table.sparql)));
+  }
   if (r.query && table.operation === 'sql') {
     details.append(el('details', { open: true }, el('summary', {}, `SQL, written by ${table.actor === 'assistant' ? 'the model' : 'you'}; reads ${(r.inputs ?? []).map(i => i.table).join(', ') || 'no tables'}`), el('pre', {}, r.query)));
   } else if (r.query) {
@@ -305,7 +314,7 @@ function renderTable(table) {
   } else if (table.variables.length) {
     body.push(el('div', { class: 'grid' }, el('table', {},
       el('thead', {}, el('tr', {}, table.variables.map(v => el('th', {}, v)))),
-      el('tbody', {}, table.rows.slice(0, SHOWN).map(row => el('tr', {}, table.variables.map(v => el('td', {}, cell(row[v], table)))))))));
+      el('tbody', {}, table.rows.slice(0, SHOWN).map(row => el('tr', {}, table.variables.map(v => el('td', {}, guidedCell(v, row[v], table) ?? cell(row[v], table)))))))));
     if (table.rows.length > SHOWN) {
       body.push(el('p', { class: 'hint' }, `Showing ${SHOWN} of ${table.rows.length} rows. All of them are in SQL table ${table.id}.`));
     }
@@ -313,6 +322,20 @@ function renderTable(table) {
   return el('div', {},
     el('h2', {}, `${table.id} · ${table.title}`, el('code', {}, JSON.stringify(table.input))),
     head, details, ...body);
+}
+
+/** In a guided table a handle opens its links, and a link's number follows it. */
+function guidedCell(variable, t, table) {
+  if (!table.guided || !t) {
+    return null;
+  }
+  if (variable === 'handle') {
+    return el('button', { class: 'hbtn', title: `links of ${t.value}`, onclick: () => runOperation('links', { of: t.value }) }, t.value);
+  }
+  if (variable === 'n' && table.operation === 'links') {
+    return el('button', { class: 'hbtn', title: 'follow this link', onclick: () => runOperation('follow', { from: table.input.of, link: Number(t.value) }) }, `${t.value} →`);
+  }
+  return null;
 }
 
 function cell(t, table) {
@@ -331,6 +354,11 @@ function cell(t, table) {
           return;
         }
         const graphs = table.graphs.length ? table.graphs : [ store.get('localStorage', 'kgf-explorer.graph') ?? 'spoke-okn' ];
+        if (table.guided) {
+          const label = table.labels?.labels.get(t.value) ?? null;
+          runOperation('links', { of: state.workspace.guide.entity(t.value, graphs[0], label).handle });
+          return;
+        }
         runOperation('describe', { graphs, iri: t.value, limit: 200 });
       },
     }, shortIri(t.value), label ? el('span', { class: 't-label' }, label) : null);
@@ -418,9 +446,9 @@ function saveSettings() {
  */
 function ensureChat() {
   const settings = { provider: $('#provider').value, apiKey: $('#key').value.trim(), model: $('#model').value.trim(), baseURL: $('#base').value.trim() };
-  const signature = JSON.stringify(settings);
+  const signature = JSON.stringify({ ...settings, mode: state.mode });
   if (state.chat && state.chatSignature !== signature) {
-    bubble('notice', 'The model settings changed, so this starts a new conversation.');
+    bubble('notice', 'The model settings or the mode changed, so this starts a new conversation.');
     state.chat = null;
   }
   if (!state.chat) {
@@ -446,7 +474,9 @@ function reply() {
 
 function renderReply(node) {
   node.innerHTML = renderMarkdown(node.source);
-  linkTables(node, id => Boolean(state.workspace?.table(id)), id => {
+  // A reply cites tables (t4) in full mode and handles (s1, e2) in guided mode.
+  const resolve = id => (state.workspace?.table(id) ? id : state.workspace?.guide.handles.get(id)?.table ?? null);
+  linkTables(node, resolve, id => {
     state.selected = id;
     renderResults();
   });
@@ -482,12 +512,14 @@ async function send() {
   $('#send').disabled = true;
   $('#chat-stop').disabled = false;
   let current = null;
-  const tools = TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
+  const tools = guided() ? guidedToolsFor(state.endpoint) : TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   try {
     await state.chat.send(text, {
-      system: SYSTEM(state.endpoint.origin),
+      system: (guided() ? GUIDED_SYSTEM : SYSTEM)(state.endpoint.origin),
       tools,
       maxTurns: Number($('#b-turns').value) || DEFAULT_TURNS,
+      // Guided mode answers only after looking: lfm2.5:8b and qwen3.5:9b wrote an omelet recipe otherwise.
+      toolFirst: guided(),
       signal: abort.signal,
       onTurnStart: () => {
         current = null;
@@ -510,7 +542,9 @@ async function send() {
             event.preventDefault();
             state.selected = id;
             renderResults();
-          } }, id), ` · ${summary.rows} rows · ${summary.contract}`);
+          } }, id), result.table.guided ?
+            ` · ${result.table.handle ?? `${result.table.rows.length} rows`}${result.table.receipt.outcome.contract === 'complete' ? '' : ` · ${result.table.receipt.outcome.contract}`}` :
+            ` · ${summary.rows} rows · ${summary.contract}`);
         } else {
           chip.append(` → read ${input.table}`);
         }
@@ -558,6 +592,13 @@ function init() {
     $(id).addEventListener('change', saveSettings);
   }
   $('#op').addEventListener('change', renderOperation);
+  state.mode = store.get('localStorage', 'kgf-explorer.mode') === 'guided' ? 'guided' : 'full';
+  $('#mode').value = state.mode;
+  $('#mode').addEventListener('change', () => {
+    state.mode = $('#mode').value;
+    store.set('localStorage', 'kgf-explorer.mode', state.mode);
+    renderOperation();
+  });
   const remembered = store.get('localStorage', 'kgf-explorer.hidden');
   showPanels(remembered === 'ops' || remembered === 'chat' ? remembered : null);
   $('#toggle-ops').addEventListener('click', () => showPanels(state.hidden === 'ops' ? null : 'ops'));
@@ -582,6 +623,6 @@ function init() {
 }
 
 // For inspection from the console; the page does not depend on it.
-window.kgfExplorer = { state, TOOLS, runOperation, summarizeForModel, ensureChat };
+window.kgfExplorer = { state, TOOLS, GUIDED_TOOLS, runOperation, summarizeForModel, ensureChat };
 
 init();

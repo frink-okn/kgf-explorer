@@ -55,6 +55,7 @@ export function createChat({ provider, apiKey, model, baseURL }) {
  *   onTurnStart()            — a new model turn began
  *   onNotice(text)           — something the person should see that is not the model's text
  *   maxTurns                 — model calls this message may make, the last with tools off
+ *   toolFirst                — the message's first turn must call a tool (guided mode, D16)
  *   signal                   — aborts the whole exchange
  */
 class AnthropicChat {
@@ -76,7 +77,8 @@ class AnthropicChat {
         this.appendNote(lastTurnNote(maxTurns));
         h.onNotice(closingNotice(maxTurns));
       }
-      const params = { model: this.model, max_tokens: 64000, system: h.system, tools, messages: this.messages, ...(closing ? { tool_choice: { type: 'none' } } : {}) };
+      const choice = closing ? { type: 'none' } : h.toolFirst && turn === 0 ? { type: 'any' } : null;
+      const params = { model: this.model, max_tokens: 64000, system: h.system, tools, messages: this.messages, ...(choice ? { tool_choice: choice } : {}) };
       const stream = FALLBACK_MODELS.has(this.model) ?
         this.client.beta.messages.stream({ ...params, betas: [ 'server-side-fallback-2026-07-01' ], fallbacks: 'default' }, { signal: h.signal }) :
         this.client.messages.stream(params, { signal: h.signal });
@@ -157,8 +159,9 @@ class OpenAIChat {
         h.onNotice(closingNotice(maxTurns));
       }
       h.onTurnStart();
+      const choice = closing ? 'none' : h.toolFirst && turn === 0 ? 'required' : null;
       const response = await this.client.chat.completions.create(
-        { model: this.model, messages: this.messages, tools, ...(closing ? { tool_choice: 'none' } : {}) },
+        { model: this.model, messages: this.messages, tools, ...(choice ? { tool_choice: choice } : {}) },
         { signal: h.signal },
       );
       const message = response.choices[0].message;

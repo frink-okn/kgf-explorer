@@ -388,7 +388,7 @@ export async function labelIris({ endpoint, graphs, iris, budget, stop }) {
 }
 
 /** `QUERY` first; a server that refuses the method gets the same body by `POST`, remembered per endpoint. */
-async function query(endpoint, fetch, url, body) {
+export async function query(endpoint, fetch, url, body) {
   const init = method => ({ method, headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) });
   if (endpoint.queryMethod !== 'POST') {
     const response = await fetch(url, init('QUERY'));
@@ -403,7 +403,7 @@ async function query(endpoint, fetch, url, body) {
 }
 
 /** Bindings in batches no larger than the server's `max_bindings` rows or `max_request_bytes`. */
-function* chunks(tuples, vars, template, maxRows, maxBytes) {
+export function* chunks(tuples, vars, template, maxRows, maxBytes) {
   let start = 0;
   while (start < tuples.length) {
     let size = Math.min(maxRows, tuples.length - start);

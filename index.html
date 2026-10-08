@@ -54,6 +54,9 @@
   td .t-label { color: var(--muted); margin-left: 6px; font-size: 11.5px; }
   td .t-label::before { content: '· '; }
   #op-desc { font-size: 12px; color: var(--muted); margin: 6px 0; }
+  header label.mode { display: flex; gap: 6px; align-items: center; margin: 0; color: var(--muted); font-size: 12.5px; }
+  header label.mode select { width: auto; padding: 3px 6px; }
+  button.hbtn { padding: 0 6px; font: 12px var(--mono); color: var(--accent); border-color: var(--accent); }
   #tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
   .tab { padding: 3px 8px; font-size: 12px; }
   .tab.on { border-color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
@@ -118,6 +121,8 @@
   <h1>KGF Explorer</h1>
   <input id="origin" value="https://apps.okn.us/kgf" aria-label="KGF endpoint">
   <button id="connect">Connect</button>
+  <label class="mode" title="Full: every operation, for a strong model. Guided: follow links by handle, for a weaker model or a first look.">mode
+    <select id="mode"><option value="full">Full</option><option value="guided">Guided</option></select></label>
   <span id="status">Loading the query engine …</span>
   <div class="panels" role="group" aria-label="Panels">
     <button id="toggle-ops" aria-controls="ops" aria-pressed="true">Operations</button>

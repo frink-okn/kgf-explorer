@@ -3,6 +3,7 @@
 // session log, though not yet in kgfq's schema. Every table's shown IRIs are labeled through
 // the graphs' /labels, beside the table and never in it (kgfq C7): labels are for reading.
 
+import { GUIDED_BY_NAME, Guide } from './guided.js';
 import { RECEIPT_SCHEMA, labelIris } from './kgf.js';
 import { TEMPLATES } from './templates.js';
 import { TOOL_BY_NAME } from './tools.js';
@@ -20,6 +21,8 @@ export class Workspace extends EventTarget {
     this.sql = sql;
     this.tables = [];
     this.log = [];
+    // Guided mode's handles (D16): e1, s1, c1 name what its operations found.
+    this.guide = new Guide();
   }
 
   changed(detail) {
@@ -32,7 +35,7 @@ export class Workspace extends EventTarget {
 
   /** Runs one operation for `actor` ("user" or "assistant") and returns its table. */
   async run(name, input, { actor, budget, stop }) {
-    const tool = TOOL_BY_NAME.get(name);
+    const tool = TOOL_BY_NAME.get(name) ?? GUIDED_BY_NAME.get(name);
     if (!tool) {
       throw new Error(`no operation named ${JSON.stringify(name)}`);
     }
@@ -60,9 +63,13 @@ export class Workspace extends EventTarget {
       input,
       actor,
       graphs: input.graphs ?? (input.graph ? [ input.graph ] : []),
+      guided: GUIDED_BY_NAME.has(name),
       ...result,
     };
     this.tables.push(table);
+    for (const h of result.handles ?? []) {
+      h.table ??= table.id;
+    }
     if (table.variables.length) {
       // Every table is also a SQL table of the same name, so a later `sql` step can read it.
       try {
@@ -144,6 +151,11 @@ export function summarizeForModel(result) {
   }
   const { table } = result;
   const r = table.receipt;
+  if (table.guided) {
+    // A guided result is already the model's view: small, counted and labeled in code.
+    const status = r.outcome.contract === 'complete' ? {} : { contract: r.outcome.contract, budget: r.outcome.budget, error: r.outcome.error };
+    return { ...table.forModel, ...status };
+  }
   const out = { table: table.id, contract: r.outcome.contract, rows: table.rows.length };
   if (r.outcome.budget) {
     out.aborted_at_budget = r.outcome.budget;

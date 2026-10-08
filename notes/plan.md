@@ -128,6 +128,38 @@ instructions. Content safety is the provider's: the visitor chose the model and 
 page can set, and it asks for more tool calls, not fewer. Added 2026-09-26: gpt-5.6-sol,
 asked for an omelet recipe, called `list_graphs` and then wrote the recipe, citing no table.
 
+**D16. Guided mode, for weaker models and first looks** (proposed and prototyped
+2026-09-28). A second list of operations (`src/guided.js`) beside D1's, with the same two
+surfaces: `graphs`, `find`, `classes`, `members`, `links`, `follow`, `common`. They take
+handles the page issued — `e1` an entity, `s1` a set, `c1` a class — never an IRI, a pattern
+or SQL, so a model cannot garble or invent one; a graph id is an enum. What the model sees is
+small and worked out in code: graphs ranked by size; classes with member counts; an entity's
+links as a numbered menu with exact counts and examples (the candidate predicates from
+`/schema`'s `class-properties` and `class-relations`, one `/count` each); a set's exact size,
+classes and first ten members, labeled. A set shows the one SPARQL query that asks for it,
+written by the page (D2), which is the mode's introduction to querying. Every operation goes
+through `Workspace.run` with a receipt, and is a button: a person can browse this way with no
+model. A message's first turn must call a tool (`tool_choice` "required", or "any" for
+Anthropic). It cannot join on values, repair them or do arithmetic; the district question
+stays in the full mode, which is unchanged. The failures it answers are §2's: garbled and
+invented IRIs, sizes ranked by eye, triples counted as members, contexts filled by
+`read_table`.
+
+*2026-09-28, later:* asked what cells are in the liver, gemma4 answered
+from NCIT: `find` kept three hits a graph, ubergraph's were NCIT's, and UBERON's liver was
+only met in biomarkerkg (2 links), with nothing saying it was in six more graphs. Now an
+entity's handle is its IRI's, whatever graph found it, and `links` covers every graph that
+holds it (up to four, most triples first; the rest named), each link with its graph: whether
+a graph holds it is a `/terms` lookup, its triples there a `/describe?limit=1`. Links are
+named by label ("part of", not `BFO_0000050`). `find` searches with `role=label` first
+(ubergraph's "liver" put UBERON's liver 59th of 200 in full text, behind 151 axiom nodes, and
+6th by label), drops skolemized blank nodes, and merges by IRI: label equal to the words
+first, then the number of graphs holding it, then each graph's order, since scores are not
+comparable across graphs (doc 03 §3.4.5). A set says where its members come from (`CL 17,
+UBERON 74`): in an ontology graph every member is an `owl:Class`, and the source is what
+tells cell types from anatomy. `narrow` keeps one source or class, with a `FILTER` in the
+set's SPARQL. Eight operations.
+
 ## 2. Measured (2026-09-24 to 2026-09-26, apps.okn.us, kgf 0.3.0)
 
 - Engine in the tab, one pattern (`describe` asthma, spoke-okn): 4 requests, 247 ms, release
@@ -160,6 +192,20 @@ asked for an omelet recipe, called `list_graphs` and then wrote the recipe, citi
   (counted triples naming Court, 100); qwen3-coder:30b 4/5 (ranked the sizes by eye);
   qwen3.5:9b 2/5 (filled 32k tokens twice, no answer); lfm2.5:8b 1/4 (wrote the recipe). The
   two that ranked the graphs right did it in `sql`.
+- The same five in guided mode (D16), same setup, the same day: gemma4:26b-a4b 5/5 at 2.3
+  model calls an answer; qwen3.5:9b 5/5; lfm2.5:8b 4/5, writing the omelet recipe even after
+  searching for it. 66 model calls, none refused by a schema or an operation; the largest prompt
+  9.8k tokens. The omelet was run again after the first-tool rule, and lfm2.5's genes and
+  courts after two prompt lines (a graph id is not search text; a "which" question follows the
+  link); the other answers came before those changes. By hand: `find` across all 45 graphs,
+  54 requests in 2.4 s; asthma's links menu, 36 requests in 269 ms; following a link from a
+  465-gene set, one bound batch, 111 ms.
+- After the cross-graph change (D16 note): `find` "liver", 62 requests in 1.2 s, UBERON's liver
+  first (in four graphs' label searches); its links across ubergraph, spoke-genelab,
+  gene-expression-atlas-okn and biobricks-aopwiki, 148 requests in 1.25 s; `← part of` in
+  ubergraph, 91 terms (UBERON 74, CL 17); `narrow` to CL, 17. gemma4, asked what cells are in
+  the liver, took find → links → follow and named CL cell types (4 model calls); it did not
+  narrow, so it gave no count.
 
 ## 3. Open
 
@@ -215,3 +261,23 @@ asked for an omelet recipe, called `list_graphs` and then wrote the recipe, citi
      is the candidate fix; unchecked.
    - The trial ran by hand in a browser pane through `test/meter_llm.py`. Item 2's harness
      should rerun its questions, three times per model.
+8. **Guided mode, prototyped** (D16). Open:
+   - A run stopped by a budget keeps nothing: the operations run under `runDirect`, which
+     returns no rows on an error. D10 says keep what arrived.
+   - A set's or a class's links menu counts the whole class, not the set; only `follow` is
+     exact for a set.
+   - `tool_choice: "required"` is checked only against Ollama; a server that refuses it fails the
+     message.
+   - Five questions, one run each. A larger set belongs in item 2's harness, three runs per
+     model, with cross-graph questions (`links` with `graph`, then `common`), which were tried by
+     hand only.
+   - lfm2.5:8b is not a candidate: it answers from its own knowledge after looking (D15).
+   - For item 4: guided mode makes a 6.6 GB model (qwen3.5:9b) a candidate for the free
+     default, and gemma4:26b-a4b the stronger one. Unchecked on CPU.
+   - A set's links cover its own graph only; an entity's cover every graph. A set's members'
+     other graphs are not yet looked for.
+   - "liver cell" finds no CL term: no graph labels hepatocyte so. Words that describe a thing
+     rather than name it need the path (find the organ, follow part of, narrow).
+   - For kgf-rs, not filed: doc 03 §3.4.5 gives `/search` `fields` and `types=true`; kgf 0.3.0
+     takes `role`, `predicate` and `labels`, and refuses `fields`. Full-text ranking puts OWL
+     axiom literals, served as skolem IRIs, above the labels of the classes they annotate.
