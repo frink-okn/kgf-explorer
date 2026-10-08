@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "A browser client over the KGF API: deterministic operations as buttons, and the same operations as a bring-your-own-model chat's tools.",
+  "license": "MIT",
   "scripts": {
     "build": "./build.sh",
     "serve": "python3 serve.py 8765"
