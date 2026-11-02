@@ -284,9 +284,13 @@ set's SPARQL. Eight operations.
      preflight also refuses `x-stainless-*`). Hugging Face, Pollinations and Puter bill the
      visitor; Hugging Face gives free accounts no credits.
 
-   *2026-11-02, the gate:* the 2026-09-28 sketch, worked through. Calls still cannot be
-   limited to this page. On our own GPU, misuse costs capacity, not money, so the gate aims at
-   a fair share and staying up:
+   *2026-11-02, the gate:* the 2026-09-28 sketch, worked through. Only the model call moves:
+   the proxy holds the conversation and relays the model's turns, and every tool call still
+   runs in the tab through `Workspace.run`, so KGF requests, joins, tables, receipts and the
+   log stay where D1, D4, D5 and D11 put them. §0 loses "is not hosted"; D12 gains a hosted
+   default beside a key, with its own adapter. Calls still cannot be limited to this page. On
+   our own GPU, misuse costs capacity, not money, so the gate aims at a fair share and staying
+   up:
    - The proxy holds the conversation. The page sends the visitor's text, or results for the
      calls the model made last turn (ids must match, each under a size cap); the proxy adds the
      system prompt and tools and sets the model, temperature and `max_tokens` a turn. A client
