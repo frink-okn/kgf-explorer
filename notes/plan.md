@@ -206,6 +206,28 @@ set's SPARQL. Eight operations.
   ubergraph, 91 terms (UBERON 74, CL 17); `narrow` to CL, 17. gemma4, asked what cells are in
   the liver, took find → links → follow and named CL cell types (4 model calls); it did not
   narrow, so it gave no count.
+- lfm2.5:24b (LFM2.5-24B-A2B, MoE, about 2B active), 2026-10-15, kgf 0.4.0 with 47 graphs:
+  the five questions, worded and metered as on 2026-09-28, one run each on two runtimes.
+  Ollama 0.40.4 serves Liquid's GGUF (Q4_K_M, 15 GB) on its llama.cpp runner; its MLX runner
+  has no `lfm2moe`. mlx-lm 0.32.0 served LiquidAI/LFM2.5-24B-A2B-MLX-4bit (13 GB) with
+  Ollama's sampling (temperature 0.1, top-k 50, repeat penalty 1.05) and `--max-tokens 32768`.
+  The answers had not moved: 465 genes; 94 courts, the members of `jxdm#Court` (100 triples
+  name it).
+  - Full mode, GGUF 3/5 and MLX 3/5. Both ranked the graphs by eye: GGUF put kwg-hazards
+    (1.278B) third, ahead of medical-device-kg (1.285B); MLX named spatialkg and fiokg. Both
+    said asthma has no genes. GGUF took 33 model calls and its prompt reached 32.2k of 32k;
+    MLX wrote asthma's IRI as `https://`, fetched one invented pattern 18 times and stopped at
+    the 50-turn cap with a 47.8k-token prompt, since mlx-lm sets no context limit. GGUF read 94
+    courts off `schema`'s entities but named `scales#Court`, which has none. Tool calls carrying
+    an IRI no message held: GGUF 7, MLX 33.
+  - Guided mode, GGUF 5/5 (15 model calls, 54 s of model time in all) and MLX 4/5: after 12
+    operations it added a one-line omelet recipe, marked as not from the graphs, which D15
+    still rules out. No invented IRIs.
+  - Speed, one model loaded: 700 tokens at 114–115 tok/s on GGUF, 94–97 on MLX; a 7.9k-token
+    prompt read at 1,575 tok/s and 1,288. On this M2 Max, MLX is the slower runtime for this
+    model.
+  - Both loaded at once held about 28 GB of weights, with 3.6 GB of disk free for swap; the
+    Mac ran out of memory and needed a force quit. A trial loads one model at a time.
 
 ## 3. Open
 
@@ -235,6 +257,64 @@ set's SPARQL. Eight operations.
    `max_tokens` and turns. It gives each visitor a quota, on a token issued after a human
    check, and keeps a bounded queue on fixed hardware that answers "busy" when full. It accepts
    an answer only after a tool call: lfm2.5:8b wrote the omelet recipe D15 forbids.
+
+   *2026-10-15:* lfm2.5:24b (MoE, about 2B active, 15 GB) scored 5/5 guided and 3/5 full on
+   GGUF (§2), at 114 tok/s on the M2 Max. With half gemma4's active parameters it is a
+   candidate for guided mode; unchecked on the serving hardware and in repeat runs. Ollama is
+   now 0.40.4, so qwen3.8:27b can be tried.
+
+   *2026-11-02:* The default has to carry full mode; guided mode (D16) has not proved useful
+   in use. A full-mode question is 10–33 model calls with prompts to 32k tokens (§2), and every
+   call carries 11.3k characters of tool definitions and 2.8k of system prompt, about 3.5k
+   tokens. Free tiers, read from each provider's pages that day, all need the visitor to sign
+   in somewhere; the preflights were sent with the OpenAI SDK's headers:
+   - OpenRouter `:free`: 50 requests a day per account, 20 a minute; 1,000 a day once $10 of
+     credits have ever been bought. With tools and `tool_choice`: Nemotron 3 Ultra 550B-A55B
+     (served by NVIDIA), Gemma 4 31B and Gemma 4 26B-A4B (served by Google AI Studio). One to
+     five full-mode questions a day. The PKCE key exchange answers a cross-origin preflight, so
+     a sign-in button needs no server.
+   - Gemini key: 3.8 Flash, 3.6 Flash and 3.5 Flash-Lite free, no Pro model. Limits show only
+     after sign-in; a third party gives 3.8 Flash 20 requests a day, one full-mode question.
+     Free-tier prompts improve Google's products. The OpenAI-compatible endpoint's preflight
+     allows `authorization, content-type` and answers 403 to the SDK's `x-stainless-*`.
+   - Groq: gpt-oss-120b and Qwen 3.8 27B at 8K tokens a minute and 200K a day. A full-mode
+     prompt passes 8K within a few calls.
+   - Not a free path: Cerebras (a $5, 30-day trial after a card), NVIDIA's API catalog (no
+     CORS headers), GitHub Models (retired 2026-07-30), Mistral (limits unpublished; its
+     preflight also refuses `x-stainless-*`). Hugging Face, Pollinations and Puter bill the
+     visitor; Hugging Face gives free accounts no credits.
+
+   *2026-11-02, the gate:* the 2026-09-28 sketch, worked through. Calls still cannot be
+   limited to this page. On our own GPU, misuse costs capacity, not money, so the gate aims at
+   a fair share and staying up:
+   - The proxy holds the conversation. The page sends the visitor's text, or results for the
+     calls the model made last turn (ids must match, each under a size cap); the proxy adds the
+     system prompt and tools and sets the model, temperature and `max_tokens` a turn. A client
+     cannot write the model's turns, which checking the prompt by hash still allowed, and every
+     request is this page partway through a question.
+   - Per question: the first turn calls a tool (`tool_choice: "required"`), D10's turn cap, and
+     a cap on context tokens, which is item 7's missing token budget.
+   - Per person: a short-lived signed token after Cloudflare Turnstile (a small quota) or a
+     sign-in through ORCID, GitHub or CILogon (a larger one). A quota on an account holds; one
+     on an IP leaks.
+   - Overall: one request in flight per person, a bounded queue, "busy" when full.
+   - CORS pinned to the page's origin. It stops no script, but another site cannot put the model
+     behind its visitors' browsers; it would have to call from its own servers, which a per-IP
+     limit catches. Sign-in redirects are pinned to the origin too.
+
+   What gets through: the visitor's text and tool results are free text, so someone speaking
+   the protocol can fake results and ask for an essay. They get a 27B model for a few questions
+   a day, under a prompt about graphs, with output capped each turn: less than OpenRouter's free
+   Nemotron 3 Ultra. What is left is floods and scrapers, which the quotas answer. Verifying
+   tool results would need kgf-rs to sign responses, and would not cover a `sql` table, which
+   the tab computes.
+
+   Sizing, unchecked on serving hardware: sent whole each turn, a full-mode question prefills on
+   the order of 300k tokens; with vLLM's or SGLang's prefix caching, about its last prompt
+   (~32k), since each turn adds only results. The proxy keeps a session on one server so the
+   cache hits. Candidates from §2: qwen3.6:27b (5/5 full, 140 s a question on the M2 Max),
+   gemma4:26b-a4b (4/5); qwen3.8:27b untried. A 27B dense model at 8 bits is about 27 GB of
+   weights; how many 32k conversations the rest of an 80 GB GPU holds is to be measured.
 5. **Claude and ChatGPT as hosts.** Published as a claude.ai artifact, the page could call
    Claude on the viewer's plan through the `sample` capability (unchecked: free plans, and
    whether the sandbox reaches the KGF endpoint). An MCP App would put the operations inside
@@ -242,23 +322,30 @@ set's SPARQL. Eight operations.
 6. **Server gaps, filed:** kgf-rs#21 (summary card hides small classes), #22 (`/schema`
    predicate drill empty without a class), #23 (`labels=true` on `/fragment`, `/describe`,
    `/sample`; `/labels` refuses `lang` and `label_source`).
-7. **Page fixes from the local-model trial** (§2, 2026-09-28). The first landed (D9 note);
-   the rest are open.
+7. **Page fixes from the local-model trials** (§2, 2026-09-28 and 2026-10-15). The first
+   landed (D9 note); the rest are open.
    - Done: `list_graphs` is shown whole.
    - A reply cut off at the context limit (`finish_reason: "length"`) shows nothing and no
      notice. qwen3.5:9b ended two questions that way. The OpenAI adapter should say so, as
-     D10's budgets do.
+     D10's budgets do. mlx-lm's server stops a reply at 512 tokens unless started with
+     `--max-tokens`, and the adapter sends no limit, so long replies from one end this way.
+   - A bare URL with a Markdown escape links wrong (D13). lfm2.5:24b wrote
+     `**http://purl.obolibrary.org/obo/DOID\_2841**`, valid CommonMark; markdown-it 15.0.2's
+     linkify keeps the backslash, so the link goes to `…/DOID%5C_2841` and the text shows
+     `DOID\_2841` (`src/markdown.js`, `linkify: true`). Escapes outside a URL, and IRIs in
+     backticks or `<…>`, render right. Every OBO IRI a model escapes this way breaks.
    - `count` with only a class as object counts every triple naming it, not its members:
      gemma4 answered 100 courts for scales' 94. The description should send a member count to
      `schema`'s entities or to `count` with `rdf:type`.
    - Nothing bounds how much of the context tool results take. One `read_table` of 200
      `describe` rows added about 13k tokens; qwen3.5:9b filled 32k twice. A token budget beside
-     D10's model turns, and a smaller `read_table` limit.
+     D10's model turns, and a smaller `read_table` limit. lfm2.5:24b on mlx-lm, which sets no
+     context limit, reached 47.8k tokens on the genes question.
    - The `sql` description says to CAST for arithmetic. Two models cast triple counts to
      INTEGER, which overflows at 6 billion, before trying BIGINT. Name BIGINT.
    - Ranking by eye: qwen3-coder:30b and lfm2.5:8b misread the three largest graphs off the
      list; the two that answered right sorted in `sql`. A prompt line to rank and count in `sql`
-     is the candidate fix; unchecked.
+     is the candidate fix; unchecked. lfm2.5:24b ranked by eye on both runtimes (2026-10-15).
    - The trial ran by hand in a browser pane through `test/meter_llm.py`. Item 2's harness
      should rerun its questions, three times per model.
 8. **Guided mode, prototyped** (D16). Open:
@@ -267,11 +354,14 @@ set's SPARQL. Eight operations.
    - A set's or a class's links menu counts the whole class, not the set; only `follow` is
      exact for a set.
    - `tool_choice: "required"` is checked only against Ollama; a server that refuses it fails the
-     message.
+     message. mlx-lm 0.32.0 ignores the field, so the first-tool rule is not enforced there;
+     lfm2.5:24b called a tool first anyway, 5 of 5 (2026-10-15).
    - Five questions, one run each. A larger set belongs in item 2's harness, three runs per
      model, with cross-graph questions (`links` with `graph`, then `common`), which were tried by
      hand only.
    - lfm2.5:8b is not a candidate: it answers from its own knowledge after looking (D15).
+     lfm2.5:24b declined the recipe on GGUF in both modes; on MLX, in guided mode, it added one
+     line of recipe after looking.
    - For item 4: guided mode makes a 6.6 GB model (qwen3.5:9b) a candidate for the free
      default, and gemma4:26b-a4b the stronger one. Unchecked on CPU.
    - A set's links cover its own graph only; an entity's cover every graph. A set's members'
