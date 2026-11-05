@@ -350,7 +350,7 @@ export const TOOLS = [
   {
     name: 'terms',
     title: 'Namespaces in graphs',
-    description: 'Which graphs use a namespace, from each graph\'s term dictionary: the exact number of distinct IRIs under each prefix, as subject, predicate and object, one request per graph per prefix. A prefix is the start of an IRI, matched byte for byte: a namespace (http://purl.obolibrary.org/obo/MONDO_), a site (https://climatepub4kg.github.io/), or a whole IRI, which also matches longer IRIs that begin with it. Graphs that hold the same IRIs join directly; this is how to find them, and which graphs use an identifier scheme at all. Another graph\'s namespace as subjects means this graph describes its entities; as objects, that it points at them. Vocabularies such as rdf, rdfs, owl and schema.org are in many graphs and say nothing about overlap. A graph\'s own namespaces are in its graph_summary. With list, the terms themselves from each graph that uses the prefix.',
+    description: 'Which graphs use a namespace, from each graph\'s term dictionary: the exact number of distinct IRIs under each prefix, as subject, predicate and object, one request per graph per prefix. A prefix is the start of an IRI, matched byte for byte: a namespace (http://purl.obolibrary.org/obo/MONDO_), a site (https://climatepub4kg.github.io/), or a whole IRI, which also matches longer IRIs that begin with it. Graphs that hold the same IRIs join directly; this is how to find them, and which graphs use an identifier scheme at all. Another graph\'s namespace as subjects means this graph describes its entities; as objects, that it points at them. Vocabularies such as rdf, rdfs, owl and schema.org are in many graphs and say nothing about overlap. A graph\'s own namespaces are in its graph_summary; overlap checks them for two to four graphs, both ways. With list, the terms themselves from each graph that uses the prefix.',
     input_schema: schema({
       prefixes: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8, examples: [ [ 'https://climatepub4kg.github.io/' ] ], description: 'One to eight prefixes: the start of IRIs, written bare (no angle brackets).' },
       graphs: ANY_GRAPHS,
@@ -371,6 +371,26 @@ export const TOOLS = [
       return runDirect({
         operation: 'terms', input, budget: ctx.budget, stop: ctx.stop,
         call: (fetch, account) => termCounts({ endpoint: ctx.endpoint, graphs, prefixes, list: input.list ?? 0, role }, fetch, account),
+      });
+    },
+  },
+  {
+    name: 'overlap',
+    title: 'Where graphs overlap',
+    description: 'Whether two to four graphs hold the same IRIs, checked both ways: each graph\'s own namespaces (those its summary lists with subjects) are counted in each of the others, from their term dictionaries. A row is one graph\'s namespace that another graph holds as subjects or objects, with the counts and one example IRI; terms with list gives the rest, and fetch, count with bind, or a template over both graphs follows them. Shared vocabularies (W3C, Dublin Core, FOAF, VANN, schema.org) are skipped, and a namespace another graph uses only for predicates is counted in the note, not shown. IRIs a graph holds under no namespace it declares are not checked. No rows means no shared identifiers under these namespaces; the graphs may still share values, which sql joins.',
+    input_schema: schema({ graphs: { ...GRAPHS, minItems: 2, description: 'Two to four graph ids from list_graphs.' } }, [ 'graphs' ]),
+    run: async(input, ctx) => {
+      const graphs = [ ...new Set(checkGraphs(input.graphs, ctx.endpoint)) ];
+      if (graphs.length < 2) {
+        throw new Error('overlap needs two to four different graphs');
+      }
+      for (const g of graphs) {
+        ctx.endpoint.link(g, 'summary');
+        ctx.endpoint.link(g, 'terms');
+      }
+      return runDirect({
+        operation: 'overlap', input, budget: ctx.budget, stop: ctx.stop,
+        call: (fetch, account) => overlapOf({ endpoint: ctx.endpoint, graphs }, fetch, account),
       });
     },
   },
@@ -663,14 +683,16 @@ function prefixList(value) {
  * prefix by role, from two binary searches over the graph's dictionary. With `list`, each
  * graph that uses a prefix then lists its first terms.
  */
+function termsUrl(endpoint, graph, params) {
+  const u = new URL(endpoint.link(graph, 'terms'));
+  for (const [ k, v ] of Object.entries(params)) {
+    u.searchParams.set(k, String(v));
+  }
+  return u.href;
+}
+
 async function termCounts({ endpoint, graphs, prefixes, list, role }, fetch, account) {
-  const url = (graph, params) => {
-    const u = new URL(endpoint.link(graph, 'terms'));
-    for (const [ k, v ] of Object.entries(params)) {
-      u.searchParams.set(k, String(v));
-    }
-    return u.href;
-  };
+  const url = (graph, params) => termsUrl(endpoint, graph, params);
   const counts = new Map();
   const answered = new Map(prefixes.map(p => [ p, 0 ]));
   const key = (prefix, graph) => `${prefix}\n${graph}`;
@@ -718,12 +740,80 @@ async function termCounts({ endpoint, graphs, prefixes, list, role }, fetch, acc
   };
 }
 
+// Namespaces of vocabularies that many graphs share: holding their IRIs says nothing about
+// whether two graphs describe the same things. Measured 2026-11-05: climatemodelskg against
+// every graph, both ways, gave 72 rows, 70 of them these.
+const VOCABULARIES = [ 'http://www.w3.org/', 'https://www.w3.org/', 'http://purl.org/dc/', 'http://xmlns.com/foaf/', 'http://purl.org/vocab/vann/', 'http://schema.org/', 'https://schema.org/' ];
+
+/**
+ * Each graph's own namespaces — those its summary's inventory lists with subjects, less the
+ * shared vocabularies — counted in each other graph by `/terms?count=true`, then one example
+ * IRI for each namespace a graph holds as subjects or objects.
+ */
+async function overlapOf({ endpoint, graphs }, fetch, account) {
+  const json = { headers: { accept: 'application/json' } };
+  const own = new Map();
+  const skipped = new Set();
+  const failures = await settleEach(graphs, async graph => {
+    const body = await readJson(await fetch(endpoint.link(graph, 'summary'), json));
+    const list = body.namespaces?.namespaces;
+    if (!list) {
+      throw new Error('its summary has no namespace inventory');
+    }
+    const subjects = list.filter(n => n.subject > 0);
+    own.set(graph, subjects.filter(n => !VOCABULARIES.some(v => n.namespace.startsWith(v))).map(n => n.namespace));
+    for (const n of subjects.filter(n => VOCABULARIES.some(v => n.namespace.startsWith(v)))) {
+      skipped.add(n.prefix || n.namespace);
+    }
+  });
+  const work = graphs.flatMap(owner => (own.get(owner) ?? []).flatMap(namespace => graphs.filter(g => g !== owner).map(graph => ({ owner, namespace, graph }))));
+  const found = [];
+  const predicateOnly = [];
+  failures.push(...await settleEach(work, async w => {
+    const c = (await readJson(await fetch(termsUrl(endpoint, w.graph, { prefix: w.namespace, role: 'any', count: 'true' }), json))).counts ?? {};
+    if (c.subject > 0 || c.object > 0) {
+      keepRow(account);
+      found.push({ ...w, ...c });
+    } else if (c.predicate > 0) {
+      predicateOnly.push(w);
+    }
+  }));
+  // One example a row: a subject when there are any, else an object.
+  failures.push(...await settleEach(found, async f => {
+    const body = await readJson(await fetch(termsUrl(endpoint, f.graph, { prefix: f.namespace, role: f.subject > 0 ? 'subject' : 'object', limit: 1 }), json));
+    f.example = body.terms?.[0]?.term ? wireTerm(body.terms[0].term) : null;
+  }));
+  const order = g => graphs.indexOf(g);
+  found.sort((a, b) => order(a.owner) - order(b.owner) || order(a.graph) - order(b.graph) || (b.subject + b.object) - (a.subject + a.object));
+  const pairs = graphs.flatMap(owner => graphs.filter(g => g !== owner).map(graph => {
+    const n = own.get(owner)?.length;
+    if (n === undefined) {
+      return `${owner}'s namespaces in ${graph}: not checked`;
+    }
+    const held = found.filter(f => f.owner === owner && f.graph === graph);
+    return `${owner}'s ${n} namespace${n === 1 ? '' : 's'} in ${graph}: ` +
+      (held.length ? held.map(f => `${f.namespace} ${f.subject} as subject, ${f.object} as object`).join('; ') : 'none held');
+  }));
+  return {
+    variables: [ 'owner', 'namespace', 'graph', 'subjects', 'objects', 'predicates', 'terms', 'example' ],
+    rows: found.map(f => ({
+      owner: lit(f.owner), namespace: lit(f.namespace), graph: lit(f.graph),
+      subjects: count(f.subject), objects: count(f.object), predicates: count(f.predicate), terms: count(f.any), example: f.example ?? null,
+    })),
+    graphs,
+    note: `${pairs.join('. ')}.` +
+      (predicateOnly.length ? ` Used only as predicates, not shown: ${predicateOnly.map(w => `${w.namespace} in ${w.graph}`).join(', ')}.` : '') +
+      (skipped.size ? ` Skipped as shared vocabularies: ${[ ...skipped ].join(', ')}.` : ''),
+    error: failureText(failures),
+  };
+}
+
 /** The summary's namespace inventory, as a section for the Markdown card. */
 function namespaceSection(ns) {
   const lines = [
     '## Namespaces',
     '',
-    'From the summary\'s JSON form: distinct IRIs under each prefix this graph declares, by position. IRIs under a namespace the graph does not declare, such as another graph\'s, are counted only below; terms counts any prefix in every graph.',
+    'Distinct IRIs under each prefix this graph declares, by position. IRIs under a namespace the graph does not declare, such as another graph\'s, are counted only below; terms counts any prefix in every graph.',
     '',
     '| prefix | namespace | IRIs | subjects | predicates | objects |',
     '|---|---|---:|---:|---:|---:|',

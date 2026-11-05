@@ -217,6 +217,27 @@ over a bound count; `graph_summary` for securechainkg; a run stopped at 10 reque
 4 graphs answered, the rest named); an unknown graph and a bad prefix refused. Not checked with
 a model: the climate question is to be asked again.
 
+*2026-11-05, later:* asked again, Opus 5.5 found the link first time and Haiku 5.5 did not
+(§2). Haiku counted securechainkg's namespaces in climatemodelskg and stopped; the link runs
+the other way, and the prompt line said only "one's namespaces in the other". So the operation
+held back above is built. `overlap`, for two to four graphs, counts each graph's own
+namespaces (those its summary lists with subjects) in each of the others, both ways, with one
+example IRI for each namespace held as subjects or objects. Shared vocabularies are skipped by
+namespace (W3C, Dublin Core, FOAF, VANN, schema.org): climatemodelskg against every graph, both
+ways, gave 72 rows (445 requests, 7.2 s), 70 of them those vocabularies. A namespace held only
+as predicates goes in the note. The prompt line now says to call it before joining two graphs
+by name or saying they do not connect.
+- climatemodelskg and securechainkg: 13 requests, 222 ms, 2 rows, the first with CESM2 as its
+  example.
+- sawgraph and biobricks-toxcast: 24 requests, 1 row (3 OBO classes as objects) and no CAS
+  link, which is by value.
+- spoke-okn, spoke-genelab and ubergraph: 84 requests, 625 ms, 15 rows, NCBI Gene and OBO each
+  way.
+
+Every graph against every other would be 16,330 requests; that map is the server's (kgf doc
+18). The summary's namespace section no longer says it comes from the JSON form, which the
+model does not need. Checked in a browser against the live endpoint; not with a model.
+
 ## 2. Measured (2026-09-24 to 2026-09-26, apps.okn.us, kgf 0.3.0)
 
 - Engine in the tab, one pattern (`describe` asthma, spoke-okn): 4 requests, 247 ms, release
@@ -355,6 +376,15 @@ a model: the climate question is to be asked again.
     the predicate is not one of securechainkg's label predicates; "CESM" does not, as `search`
     matches whole words. A match on securechainkg's `schema:name` misses it for the same
     reason. Nothing pointed the model at shared IRIs; D17 does.
+  - *2026-11-05, with D17's `terms` and `count`:* Opus 5.5 here answered right first time.
+    Haiku 5.5 did not. It matched 567 climate components to SecureChain package names (one hit
+    with a CVE, the crate `bam`, which it declined to trust) and said the graphs share no IRIs,
+    having counted only securechainkg's namespaces in climatemodelskg. Asked why, it counted
+    the other way, found the 3 Sources and answered from `dependsOn`: CESM2 18 of 18 packages
+    with a vulnerable version, GFDL-CM4 2 of 2, GFDL-ESM4 3 of 3, all checked. Six of CESM2's
+    18 (GitPython, Jinja2, Pillow, PyPDF2, PyYAML, Requests) are capitalised IRIs with no
+    triples; their lowercase IRIs have versions, every one with vulnerabilities. Haiku joined
+    them by name and said so (D15). By securechainkg's own IRIs it is 12 of 18.
 
 ## 3. Open
 
