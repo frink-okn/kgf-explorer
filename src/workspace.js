@@ -174,7 +174,7 @@ export function summarizeForModel(result) {
     }
     if (b.unmatched) {
       out.bound_values.unmatched_sample = b.unmatched_sample;
-      out.bound_values.note = 'These values found nothing in this graph. Look at their form before concluding they are absent.';
+      out.bound_values.note = 'These values found nothing in the graphs asked. Look at their form before concluding they are absent.';
     }
   }
   if (table.text !== undefined) {

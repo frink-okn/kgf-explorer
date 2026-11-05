@@ -103,7 +103,9 @@ function newAccount(budget) {
 
 /**
  * A direct KGF call (catalogue, summary, search, count) under the same accounting as a query,
- * so its receipt carries the request, the bytes and the server's request id.
+ * so its receipt carries the request, the bytes and the server's request id. A call that asks
+ * many graphs returns what arrived with an `error` when some did not answer: the rows are
+ * kept, and the contract says the table is not complete.
  */
 export async function runDirect({ operation, input, budget, stop, call }) {
   const account = newAccount(budget);
@@ -112,12 +114,15 @@ export async function runDirect({ operation, input, budget, stop, call }) {
   stop?.addEventListener('abort', onStop, { once: true });
   account.startClock();
   try {
-    const result = await call(account.fetch);
-    const outcome = { contract: 'complete', rows: result.rows.length };
+    const { error, extra, ...result } = await call(account.fetch, account);
+    const rows = result.rows.length;
+    const outcome = error === undefined ? { contract: 'complete', rows } :
+      account.exceeded ? { contract: 'aborted', rows, budget: account.exceeded, error } :
+        { contract: 'error', rows, error };
     if (result.note) {
       outcome.note = result.note;
     }
-    return { ...result, receipt: receipt({ operation, input, outcome, account, budget, started }) };
+    return { ...result, receipt: receipt({ operation, input, outcome, account, budget, started, extra }) };
   } catch (error) {
     const outcome = account.exceeded ?
       { contract: 'aborted', rows: 0, budget: account.exceeded, error: message(error) } :

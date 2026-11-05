@@ -104,6 +104,16 @@ and local servers speak. The key goes to the chosen provider only, kept in `sess
 unless "remember" is ticked. A conversation lasts until the provider, model, URL or key
 changes, and says so when it restarts.
 
+*2026-11-03:* an effort setting, Anthropic only: `output_config.effort`, low to max, or unset
+for the model's own default (medium on Opus 5.5 and Haiku 5.5, high on Opus 5 and Sonnet 5.5).
+It is read at each message, like the model turns, so changing it keeps the conversation: the
+model is the same and its history stays valid. Added to try Haiku 5.5 at high for §3 item 4;
+Anthropic's notes put knowledge work and longer agent tasks there. A model without effort
+(Haiku 4.5) answers 400, shown as D14 says. The OpenAI shape's `reasoning_effort` is not wired:
+servers disagree on its values. Checked: the request bodies with fetch stubbed (set, unset, and
+the fallback path for `claude-opus-5`), and the field in a browser, hidden for the other
+providers and remembered per provider. Not checked against the API.
+
 **D13. Model output is rendered, sanitized.** Replies render as light Markdown through
 markdown-it with raw HTML off, then DOMPurify: a reply can quote graph content, and the page
 holds a key. Links open in a new tab; table ids a reply cites link to their tables.
@@ -159,6 +169,53 @@ comparable across graphs (doc 03 §3.4.5). A set says where its members come fro
 UBERON 74`): in an ontology graph every member is an `owl:Class`, and the source is what
 tells cell types from anatomy. `narrow` keeps one source or class, with a `FILTER` in the
 set's SPARQL. Eight operations.
+
+**D17. Where graphs meet** (2026-11-05). Graphs that hold the same IRIs join directly (D3,
+the templates' `graphs`), and nothing told the model which do: Opus 5.5 here said
+climatemodelskg and securechainkg share no identifiers, and securechainkg describes three of
+climatemodelskg's Sources by their own IRIs (§2, the climate-model question). Four changes:
+- `terms` (doc 03 §3.4.8, as kgf-navigator's vocabulary page uses it): one to eight prefixes,
+  every graph by default, the exact number of distinct IRIs under each by position, from two
+  binary searches over each graph's dictionary. With `list`, the terms themselves, from each
+  graph that uses the prefix. `https://climatepub4kg.github.io/` over 47 graphs: 47 requests,
+  13.5 KiB, 339 ms, in climatemodelskg and securechainkg (3 subjects, 1 predicate, 1 object);
+  listed, the 3 are CESM2, GFDL-CM4 and GFDL-ESM4. It also picks graphs by identifier scheme:
+  MONDO IRIs are in 12 graphs, identifiers.org CAS IRIs in 4 (babel and three biobricks
+  graphs), not in SAWGraph, which stores CAS numbers as literals.
+- `count` asks every graph by default, keeping only graphs with matches (one graph asked keeps
+  its row at zero), and takes `bind` as `fetch` does: one count per bound value per graph, by
+  `QUERY /count` bindings (kgf-navigator N5; kgfq R6's `sharedKeys` by its bindings path).
+  climatemodelskg's 394 Sources as subject over 47 graphs: 47 requests, 1.8 MiB, 550 ms; all
+  394 matched, 3 of them in securechainkg (CESM2 20 triples, GFDL-ESM4 5, GFDL-CM4 4). Every
+  graph answers for every value, zeros included, about 100 bytes each, so 10,000 values over 47
+  graphs would be about 47 MB a position; the description sends a large column to `terms`
+  first. The result says how many values matched in no graph (D8).
+- `graph_summary` appends the namespace inventory from the summary's JSON form, which the
+  Markdown card leaves out, with the IRIs under no declared prefix. The inventory follows the
+  graph's own prefix table: securechainkg declares climatepub4kg's ontology namespace (its
+  `name` predicate and `Source` class) but not `…/id/`, so the 3 Sources are among its 363,672
+  subject IRIs under no prefix. A graph using another's IRIs is the case its own prefixes miss;
+  `terms` with a site-wide prefix finds them.
+- A prompt line: only the data says which graphs share IRIs, so before saying two do not
+  connect, count one's namespaces in the other with `terms`, or bind a column with `count`.
+
+Operations that ask many graphs send eight requests at a time and go on past a graph that
+fails. `runDirect` keeps what arrived: a call returns its rows with an error, the contract is
+`aborted` at the budget or `error`, the failures are verbatim by graph (D14), and the notes
+count only graphs that answered. An optional `graphs` list starts empty in the form, so a click
+gets the default. Not done: an operation from a graph to the graphs that use its namespaces. It
+is `graph_summary` then `terms`, and waits for a model that misses with both in hand. Server
+gaps, unfiled: namespaces in the Markdown card; IRIs under no prefix grouped, by host say;
+bound counts without zeros; an overlap matrix beside the catalogue (kgf doc 18, kgf-navigator
+§3 item 2).
+
+Checked in a browser against the live endpoint: `terms` from the form and from code, counts
+and lists, `role` subject; `count` over every graph (`sc:dependsOn`: securechainkg only,
+29,787,749), one graph at zero, bound to 394 IRIs and to 15 literals (none matched, all
+reported); `fetch` bound to listed terms (23 rows; the class and predicate unmatched); `sql`
+over a bound count; `graph_summary` for securechainkg; a run stopped at 10 requests (aborted,
+4 graphs answered, the rest named); an unknown graph and a bad prefix refused. Not checked with
+a model: the climate question is to be asked again.
 
 ## 2. Measured (2026-09-24 to 2026-09-26, apps.okn.us, kgf 0.3.0)
 
@@ -228,6 +285,76 @@ set's SPARQL. Eight operations.
     model.
   - Both loaded at once held about 28 GB of weights, with 3.6 GB of disk free for swap; the
     Mac ran out of memory and needed a force quit. A trial loads one model at a time.
+- One full-mode question in three setups, 2026-11-03, one run each: "Which clinical biomarker
+  genes change when human cells fly in space?" (biomarkerkg, spoke-genelab). Opus 5.5 through
+  OKN-MCP: 118 of ~200 genes across 8 NASA studies, VCAM1 and CCL2 down most often. Haiku 5.5
+  here: 218 of 229 at adjusted p < 0.05 and |log2FC| ≥ 1, read over every comparison in the
+  human studies; it saw that up and down counts matched and gave no directions, without finding
+  why. Opus 5.5 here: 439 of 466 at adjusted p < 0.05, from 4 comparisons it judged clean; 47
+  moved the same way in two or more. Checked the same day through OKN-MCP's SPARQL:
+  - Human studies hold 1,942 transcription comparisons. 116 are Space Flight against Ground
+    Control, 116 the same pairs reversed, and 1,510 carry no flight or ground label. log2fc is
+    group 1 against group 2 (`factor_space_1`, `factors_1`). Arms that match once the condition
+    is stripped leave 28 comparisons in 10 studies; 14 in 6 when a material id is required, as
+    OKN-MCP's `get_valid_contrasts` requires.
+  - Opus here used OSD-188 twice (µg in flight against a cell-culture control and against a 1G
+    hardware ground control; the graph labels no OSD-188 comparison flight or ground), OSD-635
+    once, and one of OSD-937's four. It dropped OSD-516 for differing sex or medium, true of 30
+    of its 36 and not of 6. It reached comparisons through the 332 that measure TP53, and said
+    some could be missing.
+  - Adjusted p < 0.05 passes 78–94% of the genes in each of six comparisons checked (OSD-188's
+    three µg ones, OSD-635, two of OSD-937's). With |log2FC| ≥ 1 it is 0 of 15,509 (OSD-188, µg
+    against the in-flight 1G centrifuge) to 5,930 of 11,242 (OSD-635). Opus counted on p alone
+    and said nothing of 1,012 of its 1,112 results passing.
+  - On the 14 strict comparisons, CCL2 is down in all 5 that measure it and VCAM1 down in 3 of
+    5, as the OKN-MCP answer said. Haiku's top two: GDF15 changes in 3 of 4, 2 up and 1 down;
+    ANXA3 up in 2 of 2. Haiku's table gave GDF15 "218 of 382" beside a share of 0.80; 218/382
+    is 0.57.
+  - None is a reference answer, which needs one definition of a clinical biomarker gene, the
+    clean comparisons and a fold-change cutoff. What separated the answers was knowledge of the
+    graph more than the model: OKN-MCP gives spoke-genelab's rules as a tool and in its schema
+    notes, and this page has nothing on them (item 7).
+- A second question, the same day: "Which PFAS found in water have EPA toxicity screening
+  data?" (sawgraph, biobricks-toxcast). Opus 5.5 through OKN-MCP: 34; PFOS 31,957 observations
+  and 1,510 ToxCast assay endpoints. Haiku 5.5 here: "six", with seven in its table, found by
+  name searches ("perfluoro" and eight names) and joined on DSSTox ids built from ToxCast's; it
+  said the list might be incomplete. Checked through OKN-MCP's SPARQL:
+  - 34 SAWGraph contaminants have ToxCast data by CAS, over every sample medium; it is the
+    verified count in OKN-MCP's join table. SAWGraph stores most CAS numbers without dashes,
+    which the join rebuilds. Two are fluorinated insecticides (flubendiamide, hexaflumuron; PFAS
+    only by OECD's broad definition), and perfluoro-4-isopropoxybutanoic acid is in 10 animal
+    blood samples and no water. 31 PFAS measured in water have ToxCast data, 33 with the
+    insecticides. Measured, not detected: non-detects were not separated.
+  - PFOS: 31,957 observations on its two substance records (EGAD 28,264, Water Quality Portal
+    3,693), 26,687 of them on water samples; the Portal's others are tissue (1,959), air (155)
+    and sediment (66). 1,510 ToxCast endpoints (`RO_0000056`), as the slide said.
+  - Haiku's seven are all among the 33. Its counts are triples, as it said: 1,515 ToxCast
+    triples for PFOS's 1,510 endpoints, 35,520 SAWGraph triples for its 31,957 observations.
+- A third, the same day: "Which climate models depend on software with known
+  vulnerabilities?" (climatemodelskg, securechainkg). Opus 5.5 through OKN-MCP: CESM2 uses
+  numpy (8 CVEs), torch (6) and lxml (6), among others. Haiku 5.5 here: the graphs do not
+  connect. It read climatemodelskg's 42 regional models, listed their `DRIVEN_BY_SOURCE`
+  without following it, and searched securechainkg for "RegCM", "COSMO", "WRF" and "REMO". It
+  took no name match as evidence, and said it had checked a handful. Checked through OKN-MCP's
+  SPARQL:
+  - securechainkg uses climatemodelskg's own Source IRIs as subjects of `sc:dependsOn`, for 3
+    of its 394 Sources: CESM2 (18 PyPI packages, 12 with a vulnerability), GFDL-ESM4 (numpy,
+    scipy, setuptools) and GFDL-CM4 (numpy, setuptools). CESM2's numpy 8, torch 6 and lxml 6
+    are exact; the slide names one model of three.
+  - `dependsOn` names a package; `vulnerableTo` hangs on its versions (numpy's 8 on 114 of 153).
+    The graph says a model uses a package some of whose versions were vulnerable, not that the
+    version it uses is. Where the edges come from was not looked up; torch, dash and PyPDF2
+    are odd for CESM2 itself.
+  - In securechainkg, CESM2 is named by climatemodelskg's own `name`, not `schema:name`.
+    Whether `search` reads it is unchecked. Full mode can make the join: a template over both
+    graphs matches the shared IRI (`GRAPHS` in `src/tools.js`). The miss is the model's.
+  - *2026-11-05:* Opus 5.5 here missed it too. It searched securechainkg for "climate model",
+    "E3SM", "climate", "CESM" and "WRF", matched climatemodelskg's 394 Source names against
+    securechainkg's software names (merra and modis came back), and said the two graphs share
+    no identifiers. `search` does read the name: "CESM2" finds the Source, with no label, since
+    the predicate is not one of securechainkg's label predicates; "CESM" does not, as `search`
+    matches whole words. A match on securechainkg's `schema:name` misses it for the same
+    reason. Nothing pointed the model at shared IRIs; D17 does.
 
 ## 3. Open
 
@@ -319,6 +446,38 @@ set's SPARQL. Eight operations.
    cache hits. Candidates from §2: qwen3.6:27b (5/5 full, 140 s a question on the M2 Max),
    gemma4:26b-a4b (4/5); qwen3.8:27b untried. A 27B dense model at 8 bits is about 27 GB of
    weights; how many 32k conversations the rest of an 80 GB GPU holds is to be measured.
+
+   *2026-11-03, Claude's API instead of our GPU:* the same gate, with our Anthropic key in the
+   proxy. Misuse then costs money, not capacity, so the quotas set the bill's ceiling: a cap of
+   100 Opus 5.5 questions a day holds it near $1,000 a month. Estimated, not metered on Claude.
+   The token profile is §2's local trials: light, 4 calls with context to 12k tokens; typical,
+   10 to 25k; heavy, 25 to 50k; mixed 30/50/20. Each call carries about 4.5k tokens of tools and
+   system prompt and returns 650 (about 500 of them thinking); the answer is 800. Caching is
+   5-minute. Claude's tokenizer was not run on the page's prompt, so the figures could be off by
+   about 2×. Prices from Anthropic's pricing page that day, $/MTok in, out and cache read:
+   Opus 5.5 4, 20, 0.20; Opus 5 5, 25, 0.50; Sonnet 5.5 2, 10, 0.10; Haiku 5.5 0.10, 0.50,
+   0.01, five times that above a 100k-token prompt.
+   - A question, cached, light / typical / heavy, then the mix and the mix uncached: Opus 5.5
+     $0.13 / $0.30 / $0.72, $0.33, $1.04; Opus 5 mix $0.46, $1.30; Sonnet 5.5 $0.07 / $0.15 /
+     $0.36, $0.17, $0.52; Haiku 5.5 $0.003 / $0.008 / $0.021, $0.009, $0.026, before its
+     tokenizer's ~30% more tokens.
+   - A month at the mix, 10 / 100 / 1,000 questions a day: Opus 5.5 $99 / $993 / $9,926;
+     Sonnet 5.5 $50 / $496 / $4,963; Haiku 5.5 $3 / $28 / $277. Against a GPU server assumed at
+     $1,500 a month, Opus 5.5 is cheaper below about 150 questions a day, Sonnet 5.5 below 300,
+     Haiku 5.5 below 5,000.
+   - Opus 5.5's cost is about half output, 39% cache writes and 12% cache reads. Thinking is
+     output and cannot be turned off on Opus 5.5; effort is the control (D12, 2026-11-03). Every
+     tool-result token is written to the cache once at 1.25× input, so item 7's smaller
+     `read_table` cuts the writes.
+   - The page sends no `cache_control`, so a key costs about 3× the cached figure on Opus 5.5
+     today. The Anthropic default, `claude-opus-5`, costs more than Opus 5.5.
+   - Opus 5.5, Sonnet 5.5 and Fable 5.1 answer a forced `tool_choice` (`any`, `tool`) with 400.
+     The gate's first-tool rule becomes a prompt line and a proxy check that asks again, and
+     guided mode's `toolFirst` fails on them. Haiku 5.5 accepts it but skips thinking that turn.
+   - Haiku 5.5 costs about 1/35 of Opus 5.5. On §2's GeneLab question it counted every
+     comparison, not only flight against ground; Opus 5.5 on the same page filtered them but
+     found 4 of 28. A tier to try: Haiku 5.5 for anonymous visitors, Opus 5.5 after sign-in, and
+     a button that moves a conversation up, since Opus 5.5 reads Haiku 5.5's thinking blocks.
 5. **Claude and ChatGPT as hosts.** Published as a claude.ai artifact, the page could call
    Claude on the viewer's plan through the `sample` capability (unchecked: free plans, and
    whether the sandbox reaches the KGF endpoint). An MCP App would put the operations inside
@@ -352,9 +511,28 @@ set's SPARQL. Eight operations.
      is the candidate fix; unchecked. lfm2.5:24b ranked by eye on both runtimes (2026-10-15).
    - The trial ran by hand in a browser pane through `test/meter_llm.py`. Item 2's harness
      should rerun its questions, three times per model.
+
+   *2026-11-03,* from §2's GeneLab question:
+   - Rules a graph's data needs are nowhere the model can read them. spoke-genelab's two
+     (Space Flight against Ground Control, in that order; arms that match but for the
+     condition) live in OKN-MCP's `get_valid_contrasts` and schema notes, not in KGF's
+     descriptor, so each model here finds them or not. A kgf-rs issue, unfiled: usage notes per
+     graph in the service descriptor, which `schema` could show.
+   - A cutoff that most rows pass reads as a finding. A prompt line to say what share a filter
+     keeps is the candidate; unchecked.
+   - The join a pair of graphs needs is not something the page knows. OKN-MCP keeps verified
+     recipes with their rewrites (SAWGraph's undashed CAS to `identifiers.org/cas/…`) and
+     counts; here a model finds a key or does not, and Haiku listed PFAS by name, not from
+     SAWGraph's substances (§2, the PFAS question). Whether the operations can do the CAS join
+     (list the CAS values, rebuild dashes in `sql`, look the IRIs up in biobricks-toxcast) is
+     unchecked. Where graphs share IRIs the operations can join them, but nothing tells the
+     model which do: Haiku looked for climate models in securechainkg by name, and the link is
+     climatemodelskg's own IRIs (§2, the climate-model question). *2026-11-05:* `terms` and
+     bound `count` find shared IRIs, and the prompt says to look (D17).
 8. **Guided mode, prototyped** (D16). Open:
    - A run stopped by a budget keeps nothing: the operations run under `runDirect`, which
-     returns no rows on an error. D10 says keep what arrived.
+     returns no rows on an error. D10 says keep what arrived. *2026-11-05:* `runDirect` takes a
+     partial result now (D17); guided mode's operations do not return one yet.
    - A set's or a class's links menu counts the whole class, not the set; only `follow` is
      exact for a set.
    - `tool_choice: "required"` is checked only against Ollama; a server that refuses it fails the

@@ -163,13 +163,16 @@ function renderOperation() {
     const required = tool.input_schema.required.includes(name);
     let input;
     if (name === 'graphs') {
+      // An optional list starts empty: its default (every graph, or the table's) is the point.
       input = el('select', { name, multiple: true, size: 5 },
-        graphIds.map(id => el('option', { value: id, selected: id === remembered }, id)));
+        graphIds.map(id => el('option', { value: id, selected: required && id === remembered }, id)));
     } else if (name === 'graph') {
       input = el('select', { name }, required ? null : el('option', { value: '' }, '(none)'),
         graphIds.map(id => el('option', { value: id, selected: required && id === remembered }, id)));
     } else if (prop.enum) {
       input = el('select', { name }, prop.enum.map(v => el('option', { value: v }, v)));
+    } else if (prop.type === 'array') {
+      input = el('input', { name, type: 'text', 'data-list': 'true', placeholder: `${prop.examples?.[0]?.[0] ?? ''} (several: separate with spaces)`, spellcheck: 'false', autocomplete: 'off' });
     } else if (prop.type === 'object') {
       input = el('input', { name, type: 'text', 'data-json': 'true', placeholder: '{"table": "t4", "columns": {"z": "s"}}', spellcheck: 'false', autocomplete: 'off' });
     } else if (name === 'query') {
@@ -190,10 +193,13 @@ function readForm() {
       continue;
     }
     if (field.multiple) {
-      input[field.name] = [ ...field.selectedOptions ].map(o => o.value);
-      if (input[field.name][0]) {
-        store.set('localStorage', 'kgf-explorer.graph', input[field.name][0]);
+      const chosen = [ ...field.selectedOptions ].map(o => o.value);
+      if (chosen.length) {
+        input[field.name] = chosen;
+        store.set('localStorage', 'kgf-explorer.graph', chosen[0]);
       }
+    } else if (field.value.trim() !== '' && field.dataset.list) {
+      input[field.name] = field.value.trim().split(/\s+/u);
     } else if (field.value !== '' && field.dataset.json) {
       try {
         input[field.name] = JSON.parse(field.value);
@@ -409,6 +415,7 @@ You answer from the graphs. Facts in an answer come from this session's tables, 
 - Turn names into IRIs with search. Use only IRIs you have seen in a result or a summary; never construct one.
 - Use count to size a pattern before fetching anything that could be large.
 - For questions that need more than one hop, or counting, work in steps: fetch each pattern you need into a table (bound to a column of an earlier table when the pattern alone is large), then combine the tables with one sql query. Every table tN is a SQL table.
+- Graphs that hold the same IRIs join directly, and only the data says which do: titles, descriptions and names are not evidence either way. Before saying two graphs do not connect, check. terms counts a namespace in every graph at once (a graph's own namespaces are in its graph_summary: those its subjects use); count with bind says where each IRI of a column appears, as subject or as object.
 - Graphs that share no IRIs may still share values, such as a ZIP code stored as a literal in both. Join such tables on the value in sql.
 - Results come with a labels map for the IRIs you are shown. Labels are for reading; later steps take the IRI itself. When names must be part of a table, such as a final answer, use labels on a column and join the result in sql.
 - Report the denominator: say how many of what you started from, and how many survived each join or bound fetch. A bound fetch reports the values that matched nothing; when a step loses values, look at a sample of what was lost (padding, leading zeros, case, datatype, identifier scheme) before you answer, and repair it in sql if you can. Name what you counted, so a reader can check it against the question.
@@ -422,6 +429,9 @@ function renderProvider() {
   $('#base').value = store.get('localStorage', `kgf-explorer.base.${provider}`) ?? p.base ?? '';
   $('#model').value = store.get('localStorage', `kgf-explorer.model.${provider}`) ?? p.model;
   $('#model').placeholder = provider === 'openrouter' ? 'e.g. anthropic/claude-opus-5' : provider === 'anthropic' ? 'claude-opus-5' : 'model id';
+  $('#effort-row').hidden = !p.efforts;
+  $('#effort').replaceChildren(el('option', { value: '' }, 'the model\'s default'), ...(p.efforts ?? []).map(e => el('option', { value: e }, e)));
+  $('#effort').value = store.get('localStorage', `kgf-explorer.effort.${provider}`) ?? '';
   $('#key').placeholder = p.keyHint;
   $('#key').value = store.get('sessionStorage', `kgf-explorer.key.${provider}`) ?? store.get('localStorage', `kgf-explorer.key.${provider}`) ?? '';
   $('#remember').checked = store.get('localStorage', `kgf-explorer.key.${provider}`) !== null;
@@ -433,6 +443,9 @@ function saveSettings() {
   store.set('localStorage', `kgf-explorer.model.${provider}`, $('#model').value.trim() || null);
   if (PROVIDERS[provider].base) {
     store.set('localStorage', `kgf-explorer.base.${provider}`, $('#base').value.trim() || null);
+  }
+  if (PROVIDERS[provider].efforts) {
+    store.set('localStorage', `kgf-explorer.effort.${provider}`, $('#effort').value || null);
   }
   const key = $('#key').value.trim() || null;
   store.set('sessionStorage', `kgf-explorer.key.${provider}`, key);
@@ -518,6 +531,8 @@ async function send() {
       system: (guided() ? GUIDED_SYSTEM : SYSTEM)(state.endpoint.origin),
       tools,
       maxTurns: Number($('#b-turns').value) || DEFAULT_TURNS,
+      // Read per message, like the turns: a different effort is the same model, so the conversation stays.
+      effort: $('#effort').value || null,
       // Guided mode answers only after looking: lfm2.5:8b and qwen3.5:9b wrote an omelet recipe otherwise.
       toolFirst: guided(),
       signal: abort.signal,
@@ -588,7 +603,7 @@ function init() {
   $('#provider').value = store.get('localStorage', 'kgf-explorer.provider') ?? 'anthropic';
   renderProvider();
   $('#provider').addEventListener('change', renderProvider);
-  for (const id of [ '#model', '#base', '#key', '#remember' ]) {
+  for (const id of [ '#model', '#effort', '#base', '#key', '#remember' ]) {
     $(id).addEventListener('change', saveSettings);
   }
   $('#op').addEventListener('change', renderOperation);

@@ -7,7 +7,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 
 export const PROVIDERS = {
-  anthropic: { label: 'Anthropic — Claude API key', model: 'claude-opus-5', keyHint: 'sk-ant-…' },
+  // efforts: the levels `output_config.effort` takes; unset, each model uses its own default.
+  anthropic: { label: 'Anthropic — Claude API key', model: 'claude-opus-5', keyHint: 'sk-ant-…', efforts: [ 'low', 'medium', 'high', 'xhigh', 'max' ] },
   openai: { label: 'OpenAI — API key', base: 'https://api.openai.com/v1', model: '', keyHint: 'sk-…' },
   openrouter: { label: 'OpenRouter — one key, many models', base: 'https://openrouter.ai/api/v1', model: '', keyHint: 'sk-or-…' },
   custom: { label: 'OpenAI-compatible — custom URL', base: 'http://localhost:11434/v1', model: '', keyHint: 'often unused locally' },
@@ -78,7 +79,11 @@ class AnthropicChat {
         h.onNotice(closingNotice(maxTurns));
       }
       const choice = closing ? { type: 'none' } : h.toolFirst && turn === 0 ? { type: 'any' } : null;
-      const params = { model: this.model, max_tokens: 64000, system: h.system, tools, messages: this.messages, ...(choice ? { tool_choice: choice } : {}) };
+      const params = {
+        model: this.model, max_tokens: 64000, system: h.system, tools, messages: this.messages,
+        ...(choice ? { tool_choice: choice } : {}),
+        ...(h.effort ? { output_config: { effort: h.effort } } : {}),
+      };
       const stream = FALLBACK_MODELS.has(this.model) ?
         this.client.beta.messages.stream({ ...params, betas: [ 'server-side-fallback-2026-07-01' ], fallbacks: 'default' }, { signal: h.signal }) :
         this.client.messages.stream(params, { signal: h.signal });

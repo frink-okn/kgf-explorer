@@ -2,7 +2,7 @@
 // the chat hands the same list to the model as its tools. A model's call and a person's
 // click go through one function, land as one kind of table, and write one kind of log record.
 
-import { RECEIPT_SCHEMA, formatTerm, lookupLabels, readJson, runDirect, runFetch, runSparql, wireTerm } from './kgf.js';
+import { RECEIPT_SCHEMA, chunks, formatTerm, lookupLabels, query, readJson, runDirect, runFetch, runSparql, wireTerm } from './kgf.js';
 import { TEMPLATES, iri, limit } from './templates.js';
 import { termsFromSql } from './terms.js';
 
@@ -11,14 +11,22 @@ const GRAPHS = {
   items: { type: 'string' },
   minItems: 1,
   maxItems: 4,
-  description: 'Graph ids from list_graphs. Two or more graphs are queried together: each pattern is matched in every graph, which is how a join crosses graphs that share IRIs.',
+  description: 'Graph ids from list_graphs. Two or more graphs are queried together: each pattern is matched in every graph, which is how a join crosses graphs that share IRIs. terms and count say which graphs share them.',
 };
+// For operations that ask every graph at once: one cheap request each, so no cap of four.
+const ANY_GRAPHS = { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Graph ids from list_graphs. Default: every graph.' };
 const GRAPH = { type: 'string', description: 'A graph id from list_graphs.' };
 const LIMIT = { type: 'integer', minimum: 1, description: 'Maximum rows (default 200; at most the endpoint\'s max_output_rows).' };
 const TERM = (position, example) => ({ type: 'string', examples: [ example ], description: `The ${position}: ?name for a variable (it becomes a column), an IRI, or a quoted literal such as "20695" or "asthma"@en. Omit for an unnamed variable.` });
 const GRADES = [ 'asserted', 'external', 'sparql', 'bundle' ];
 const IRI = description => ({ type: 'string', description: `${description} An absolute IRI, as it appears in an earlier result.` });
 const DIRECTION = { type: 'string', enum: [ 'out', 'in' ], description: '"out" follows the predicate from the known node to the new one; "in" follows it backwards.' };
+const COUNT_TERM = (position, example) => ({ type: 'string', examples: [ example ], description: `The ${position}: an IRI, a quoted literal such as "20695" or "asthma"@en, or ?name to take the values bind gives it. Omit to match any ${position}.` });
+const BIND = {
+  type: 'object',
+  properties: { table: { type: 'string' }, columns: { type: 'object', additionalProperties: { type: 'string' } } },
+  required: [ 'table', 'columns' ],
+};
 
 function schema(properties, required) {
   return { type: 'object', properties, required, additionalProperties: false };
@@ -92,6 +100,7 @@ function resolveBind(bind, pattern, workspace) {
   }
   const seen = new Set();
   const tuples = [];
+  const values = [];
   for (const row of table.rows) {
     const terms = variables.map(v => row[bind.columns[v]]);
     if (terms.some(t => !t)) {
@@ -102,9 +111,81 @@ function resolveBind(bind, pattern, workspace) {
     if (!seen.has(key)) {
       seen.add(key);
       tuples.push(formatted);
+      values.push(terms);
     }
   }
-  return { table: bind.table, columns: bind.columns, variables, tuples };
+  // tuples in request syntax, values as the terms themselves, index for index.
+  return { table: bind.table, columns: bind.columns, variables, tuples, values };
+}
+
+/** The graphs an every-graph operation asks: those named, or every graph that offers `link`. */
+function graphsOrAll(graphs, endpoint, link) {
+  if (graphs === undefined || graphs === null || (Array.isArray(graphs) && graphs.length === 0)) {
+    return [ ...endpoint.graphs.values() ].filter(d => d.links?.[link]).map(d => d.id);
+  }
+  if (!Array.isArray(graphs)) {
+    throw new Error('graphs must be a list of graph ids');
+  }
+  for (const g of graphs) {
+    endpoint.link(g, link);
+  }
+  return [ ...new Set(graphs) ];
+}
+
+/**
+ * Runs `work` on each item a few at a time, past any that fail: a graph that does not answer
+ * is named, not fatal. Once a run is over budget or stopped every later request fails at
+ * once, so the rest settle quickly.
+ */
+async function settleEach(items, work, width = 8) {
+  const failures = [];
+  let next = 0;
+  const worker = async() => {
+    while (next < items.length) {
+      const item = items[next++];
+      try {
+        await work(item);
+      } catch (error) {
+        failures.push({ graph: item.graph ?? item, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker));
+  return failures;
+}
+
+/** The first few failures verbatim, by graph; undefined when every graph answered. */
+function failureText(failures) {
+  if (!failures.length) {
+    return undefined;
+  }
+  const graphs = [ ...new Set(failures.map(f => f.graph)) ];
+  const named = graphs.length > 10 ? `${graphs.slice(0, 10).join(', ')}, and ${graphs.length - 10} more` : graphs.join(', ');
+  // One line per distinct error: a budget stops every graph with the same one.
+  const distinct = [ ...new Map(failures.map(f => [ f.error, f ])).values() ];
+  const shown = distinct.slice(0, 3).map(f => `${f.graph}: ${f.error.length > 1000 ? `${f.error.slice(0, 1000)}…` : f.error}`);
+  return `${graphs.length} graph${graphs.length === 1 ? '' : 's'} did not answer in full (${named}).\n${shown.join('\n')}` +
+    (distinct.length > shown.length ? `\n…and ${distinct.length - shown.length} more distinct errors` : '');
+}
+
+/** "N graphs", or "N graphs answered" when some did not: a denominator counts only answers. */
+function answeredOf(answered, asked) {
+  return answered === asked ? `${asked} graphs` : `${answered} graphs answered (of ${asked} asked)`;
+}
+
+/** Keeps a row under the visitor's row budget, or ends the run there. */
+function keepRow(account) {
+  if (!account.countRow()) {
+    account.abort('max_rows', `${account.rows} rows kept`);
+    throw account.signal.reason;
+  }
+}
+
+/** "a 3, b 2, …": the first ten of a graph → number list, largest first. */
+function perGraph(entries) {
+  const sorted = [ ...entries ].sort((a, b) => b[1] - a[1]);
+  const shown = sorted.slice(0, 10).map(([ g, n ]) => `${g} ${n.toLocaleString('en-US')}`).join(', ');
+  return sorted.length > 10 ? `${shown}, and ${sorted.length - 10} more` : shown;
 }
 
 /** kgfq D17: a derived table's grade is the lowest grade among the tables it read. */
@@ -187,7 +268,7 @@ export const TOOLS = [
   {
     name: 'graph_summary',
     title: 'Graph summary',
-    description: 'The graph\'s summary card, written by the server from its statistics: description, counts, the largest classes and predicates with their counts, and the leading class→predicate→class relations. It lists only the largest; schema lists everything. Read it before choosing predicates or classes for a query.',
+    description: 'The graph\'s summary card, written by the server from its statistics: description, counts, the largest classes and predicates with their counts, the leading class→predicate→class relations, and every namespace the graph declares with its IRIs by position. It lists only the largest classes; schema lists everything. Read it before choosing predicates or classes for a query.',
     input_schema: schema({ graph: GRAPH }, [ 'graph' ]),
     run: async(input, ctx) => runDirect({
       operation: 'graph_summary', input, budget: ctx.budget, stop: ctx.stop,
@@ -195,9 +276,16 @@ export const TOOLS = [
         const url = new URL(ctx.endpoint.link(input.graph, 'summary'));
         url.searchParams.set('format', 'md');
         const response = await fetch(url.href, { headers: { accept: 'text/markdown' } });
-        const text = await response.text();
+        let text = await response.text();
         if (!response.ok) {
           throw new Error(`${response.status} ${response.statusText} from ${url.href}\n${text}`);
+        }
+        // The Markdown card leaves out the namespace inventory its JSON form carries.
+        if (!/^## Namespaces/mu.test(text)) {
+          const json = await readJson(await fetch(ctx.endpoint.link(input.graph, 'summary'), { headers: { accept: 'application/json' } }));
+          if (json.namespaces?.namespaces) {
+            text = `${text.trimEnd()}\n\n${namespaceSection(json.namespaces)}\n`;
+          }
         }
         return { variables: [], rows: [], text };
       },
@@ -234,27 +322,57 @@ export const TOOLS = [
   {
     name: 'count',
     title: 'Count a pattern',
-    description: 'The exact number of triples matching a pattern in one graph, from the server\'s index, in one request. Any of subject, predicate, object may be left out. Count before fetching anything that could be large.',
-    input_schema: schema({ graph: GRAPH, subject: IRI('Subject.'), predicate: IRI('Predicate.'), object: IRI('Object.') }, [ 'graph' ]),
-    run: async(input, ctx) => runDirect({
-      operation: 'count', input, budget: ctx.budget, stop: ctx.stop,
-      call: async fetch => {
-        const url = new URL(ctx.endpoint.link(input.graph, 'count'));
-        for (const [ key, param ] of [ [ 'subject', 's' ], [ 'predicate', 'p' ], [ 'object', 'o' ] ]) {
-          if (input[key]) {
-            url.searchParams.set(param, iri(input[key], key));
-          }
+    description: 'The exact number of triples matching one pattern, from each graph\'s index, one request per graph. Any of subject, predicate, object may be left out. Without graphs every graph is asked, and only graphs with matches are kept: that says which graphs use a predicate or hold an IRI. With bind, a ?variable takes the distinct values of an earlier table\'s column, as in fetch, and each value gets its own count in each graph: subject "?x" bound to a column of IRIs says where each one is described, object "?x" where each one is pointed at. The result says how many values matched in no graph. Every value is answered by every graph asked, so for a large column narrow the graphs with terms first. Count before fetching anything that could be large.',
+    input_schema: schema({
+      graphs: ANY_GRAPHS,
+      subject: COUNT_TERM('subject', '?x'),
+      predicate: COUNT_TERM('predicate', '<https://w3id.org/secure-chain/dependsOn>'),
+      object: COUNT_TERM('object', '"asthma"@en'),
+      bind: { ...BIND, description: 'Optional. {"table": "t1", "columns": {"x": "source"}} binds the pattern\'s ?x to the values of t1\'s column source.' },
+    }, []),
+    run: async(input, ctx) => {
+      const graphs = graphsOrAll(input.graphs, ctx.endpoint, 'count');
+      const pattern = { s: position(input.subject, 's'), p: position(input.predicate, 'p'), o: position(input.object, 'o') };
+      const bind = resolveBind(input.bind, pattern, ctx.workspace);
+      for (const v of bind?.variables ?? []) {
+        if ([ 'graph', 'count', 'exact' ].includes(v)) {
+          throw new Error(`?${v} names a column count adds; bind another name`);
         }
-        const body = await readJson(await fetch(url.href, { headers: { accept: 'application/json' } }));
-        return {
-          variables: [ 'subject', 'predicate', 'object', 'count', 'exact' ],
-          rows: [ {
-            subject: patternTerm(body.pattern.s), predicate: patternTerm(body.pattern.p), object: patternTerm(body.pattern.o),
-            count: lit(String(body.count.value)), exact: lit(String(body.count.exact)),
-          } ],
-        };
-      },
-    }),
+      }
+      return runDirect({
+        operation: 'count', input, budget: ctx.budget, stop: ctx.stop,
+        call: (fetch, account) => (bind ?
+          countBound({ endpoint: ctx.endpoint, graphs, pattern, bind }, fetch, account) :
+          countPlain({ endpoint: ctx.endpoint, graphs, pattern }, fetch)),
+      });
+    },
+  },
+  {
+    name: 'terms',
+    title: 'Namespaces in graphs',
+    description: 'Which graphs use a namespace, from each graph\'s term dictionary: the exact number of distinct IRIs under each prefix, as subject, predicate and object, one request per graph per prefix. A prefix is the start of an IRI, matched byte for byte: a namespace (http://purl.obolibrary.org/obo/MONDO_), a site (https://climatepub4kg.github.io/), or a whole IRI, which also matches longer IRIs that begin with it. Graphs that hold the same IRIs join directly; this is how to find them, and which graphs use an identifier scheme at all. Another graph\'s namespace as subjects means this graph describes its entities; as objects, that it points at them. Vocabularies such as rdf, rdfs, owl and schema.org are in many graphs and say nothing about overlap. A graph\'s own namespaces are in its graph_summary. With list, the terms themselves from each graph that uses the prefix.',
+    input_schema: schema({
+      prefixes: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8, examples: [ [ 'https://climatepub4kg.github.io/' ] ], description: 'One to eight prefixes: the start of IRIs, written bare (no angle brackets).' },
+      graphs: ANY_GRAPHS,
+      list: { type: 'integer', minimum: 1, description: 'Optional. Also list up to this many terms under each prefix in each graph that uses it, in dictionary order, with their positions (at most the endpoint\'s max_limit). Without it, counts only.' },
+      role: { type: 'string', enum: [ 'any', 'subject', 'predicate', 'object' ], description: 'With list: only terms in this position. Default any.' },
+    }, [ 'prefixes' ]),
+    run: async(input, ctx) => {
+      const prefixes = prefixList(input.prefixes);
+      const graphs = graphsOrAll(input.graphs, ctx.endpoint, 'terms');
+      const maxList = ctx.endpoint.descriptor.caps?.max_limit ?? 10_000;
+      if (input.list !== undefined && input.list !== null && (!Number.isInteger(input.list) || input.list < 1 || input.list > maxList)) {
+        throw new Error(`list must be an integer from 1 to ${maxList}, this endpoint's max_limit`);
+      }
+      const role = input.role ?? 'any';
+      if (![ 'any', 'subject', 'predicate', 'object' ].includes(role)) {
+        throw new Error('role must be any, subject, predicate or object');
+      }
+      return runDirect({
+        operation: 'terms', input, budget: ctx.budget, stop: ctx.stop,
+        call: (fetch, account) => termCounts({ endpoint: ctx.endpoint, graphs, prefixes, list: input.list ?? 0, role }, fetch, account),
+      });
+    },
   },
   {
     name: 'schema',
@@ -327,12 +445,7 @@ export const TOOLS = [
       subject: TERM('subject', '?prov'),
       predicate: TERM('predicate', '<https://schema.org/postalCode>'),
       object: TERM('object', '?zip'),
-      bind: {
-        type: 'object',
-        description: 'Optional. {"table": "t4", "columns": {"z": "s"}} binds the pattern\'s ?z to the values of t4\'s column s.',
-        properties: { table: { type: 'string' }, columns: { type: 'object', additionalProperties: { type: 'string' } } },
-        required: [ 'table', 'columns' ],
-      },
+      bind: { ...BIND, description: 'Optional. {"table": "t4", "columns": {"z": "s"}} binds the pattern\'s ?z to the values of t4\'s column s.' },
     }, [ 'graph' ]),
     run: async(input, ctx) => {
       const pattern = { s: position(input.subject, 's'), p: position(input.predicate, 'p'), o: position(input.object, 'o') };
@@ -437,6 +550,191 @@ async function schemaItems(fetch, endpoint, graph, params) {
 }
 
 const byTriples = (a, b) => Number(b.counts?.triples ?? 0) - Number(a.counts?.triples ?? 0);
+
+/** One `/count` per graph; a graph's row is kept when it matched, or when it was the only one asked. */
+async function countPlain({ endpoint, graphs, pattern }, fetch) {
+  const answers = new Map();
+  const failures = await settleEach(graphs, async graph => {
+    const url = new URL(endpoint.link(graph, 'count'));
+    for (const [ pos, t ] of Object.entries(pattern)) {
+      if (!t.variable) {
+        url.searchParams.set(pos, t.text);
+      }
+    }
+    answers.set(graph, await readJson(await fetch(url.href, { headers: { accept: 'application/json' } })));
+  });
+  const n = graph => Number(answers.get(graph).count.value);
+  const kept = graphs.filter(g => answers.has(g) && (graphs.length === 1 || n(g) > 0)).sort((a, b) => n(b) - n(a));
+  return {
+    variables: [ 'graph', 'subject', 'predicate', 'object', 'count', 'exact' ],
+    rows: kept.map(g => {
+      const body = answers.get(g);
+      return {
+        graph: lit(g), subject: patternTerm(body.pattern.s), predicate: patternTerm(body.pattern.p), object: patternTerm(body.pattern.o),
+        count: count(body.count.value), exact: lit(String(body.count.exact)),
+      };
+    }),
+    graphs: kept,
+    note: graphs.length === 1 ? undefined : `${kept.length} of ${answeredOf(answers.size, graphs.length)} have matching triples${kept.length ? `: ${perGraph(kept.map(g => [ g, n(g) ]))}` : ''}`,
+    error: failureText(failures),
+  };
+}
+
+/**
+ * Bound counts (kgf-navigator N5): one `QUERY /count` per graph per batch of bindings, one
+ * count per bound value. Every graph answers for every value, zeros included, so the bytes
+ * grow with values × graphs; only values that matched become rows.
+ */
+async function countBound({ endpoint, graphs, pattern, bind }, fetch, account) {
+  const caps = endpoint.descriptor.caps ?? {};
+  const vars = bind.variables.map(v => `?${v}`);
+  const template = { pattern: Object.fromEntries(Object.entries(pattern).map(([ pos, t ]) => [ pos, t.variable ? `?${t.variable}` : t.text ])) };
+  const batches = [ ...chunks(bind.tuples, vars, template, caps.max_bindings ?? 200, endpoint.descriptor.budgets?.max_request_bytes ?? 2 ** 20) ];
+  const offsets = batches.map((_, b) => batches.slice(0, b).reduce((n, rows) => n + rows.length, 0));
+  const found = new Map(graphs.map(g => [ g, new Map() ]));
+  const answered = batches.map(() => 0);
+  const work = graphs.flatMap(graph => batches.map((_, b) => ({ graph, b })));
+  const failures = await settleEach(work, async ({ graph, b }) => {
+    const body = await readJson(await query(endpoint, fetch, endpoint.link(graph, 'count'), { ...template, bindings: { vars, rows: batches[b] } }));
+    for (const c of body.counts ?? []) {
+      if (Number(c.count?.value ?? 0) > 0) {
+        keepRow(account);
+        found.get(graph).set(offsets[b] + c.binding, c.count);
+      }
+    }
+    answered[b]++;
+  });
+  // Only batches every graph answered can say a value matched nowhere.
+  let checked = 0;
+  const unmatched = [];
+  const matchedAnywhere = new Set([ ...found.values() ].flatMap(m => [ ...m.keys() ]));
+  batches.forEach((rows, b) => {
+    if (answered[b] === graphs.length) {
+      checked += rows.length;
+      for (let i = offsets[b]; i < offsets[b] + rows.length; i++) {
+        if (!matchedAnywhere.has(i)) {
+          unmatched.push(i);
+        }
+      }
+    }
+  });
+  const holding = graphs.filter(g => found.get(g).size).sort((a, b) => found.get(b).size - found.get(a).size);
+  const rows = holding.flatMap(g => [ ...found.get(g) ].sort((a, b) => a[0] - b[0]).map(([ i, c ]) => ({
+    ...Object.fromEntries(bind.variables.map((v, k) => [ v, bind.values[i][k] ])),
+    graph: lit(g), count: count(c.value), exact: lit(String(c.exact)),
+  })));
+  return {
+    variables: [ ...bind.variables, 'graph', 'count', 'exact' ],
+    rows,
+    graphs: holding,
+    note: `${matchedAnywhere.size} of ${bind.tuples.length} bound values matched, in ${holding.length} of ${answeredOf(graphs.length - new Set(failures.map(f => f.graph)).size, graphs.length)}` +
+      (holding.length ? `; values matched per graph: ${perGraph(holding.map(g => [ g, found.get(g).size ]))}` : ''),
+    extra: {
+      bindings: {
+        table: bind.table, columns: bind.columns, tuples: bind.tuples.length, chunks: batches.length, graphs: graphs.length,
+        checked, matched: checked - unmatched.length, unmatched: unmatched.length,
+        unmatched_sample: unmatched.slice(0, 8).map(i => bind.tuples[i].join(' ')),
+      },
+    },
+    error: failureText(failures),
+  };
+}
+
+/** Prefixes as given, or space-separated from the page's form; brackets dropped. */
+function prefixList(value) {
+  const list = typeof value === 'string' ? value.split(/\s+/u) : value;
+  if (!Array.isArray(list)) {
+    throw new Error('prefixes must be a list of IRI prefixes');
+  }
+  const out = [ ...new Set(list.map(p => (typeof p === 'string' ? p.trim().replace(/^<|>$/gu, '') : p)).filter(p => p !== '')) ];
+  if (out.length === 0 || out.length > 8) {
+    throw new Error('prefixes must list one to eight IRI prefixes');
+  }
+  for (const p of out) {
+    if (typeof p !== 'string' || /\s/u.test(p)) {
+      throw new Error(`a prefix is the start of an IRI with no spaces; got ${JSON.stringify(p)}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * `/terms` (doc 03 §3.4.8): with `count=true`, the exact number of distinct terms under a
+ * prefix by role, from two binary searches over the graph's dictionary. With `list`, each
+ * graph that uses a prefix then lists its first terms.
+ */
+async function termCounts({ endpoint, graphs, prefixes, list, role }, fetch, account) {
+  const url = (graph, params) => {
+    const u = new URL(endpoint.link(graph, 'terms'));
+    for (const [ k, v ] of Object.entries(params)) {
+      u.searchParams.set(k, String(v));
+    }
+    return u.href;
+  };
+  const counts = new Map();
+  const answered = new Map(prefixes.map(p => [ p, 0 ]));
+  const key = (prefix, graph) => `${prefix}\n${graph}`;
+  const failures = await settleEach(prefixes.flatMap(prefix => graphs.map(graph => ({ prefix, graph }))), async ({ prefix, graph }) => {
+    const body = await readJson(await fetch(url(graph, { prefix, role: 'any', count: 'true' }), { headers: { accept: 'application/json' } }));
+    answered.set(prefix, answered.get(prefix) + 1);
+    const c = body.counts ?? { any: Number(body.count?.value ?? 0) };
+    if (Number(c.any) > 0) {
+      counts.set(key(prefix, graph), { prefix, graph, ...c });
+    }
+  });
+  const used = prefixes.flatMap(prefix => graphs.map(graph => counts.get(key(prefix, graph))).filter(Boolean).sort((a, b) => b.any - a.any));
+  const holding = [ ...new Set(used.map(u => u.graph)) ];
+  const lines = prefixes.map(prefix => {
+    const here = used.filter(u => u.prefix === prefix);
+    return `${prefix}: ${here.length} of ${answeredOf(answered.get(prefix), graphs.length)}${here.length ? ` (${perGraph(here.map(u => [ u.graph, Number(u.any) ]))} terms)` : ''}`;
+  });
+  if (!list) {
+    return {
+      variables: [ 'prefix', 'graph', 'terms', 'subjects', 'predicates', 'objects' ],
+      rows: used.map(u => ({ prefix: lit(u.prefix), graph: lit(u.graph), terms: count(u.any), subjects: count(u.subject), predicates: count(u.predicate), objects: count(u.object) })),
+      graphs: holding,
+      note: `Distinct IRIs under each prefix; a term in several positions counts once in terms. ${lines.join('; ')}`,
+      error: failureText(failures),
+    };
+  }
+  const listed = new Map();
+  failures.push(...await settleEach(used, async u => {
+    const body = await readJson(await fetch(url(u.graph, { prefix: u.prefix, role, limit: list }), { headers: { accept: 'application/json' } }));
+    const rows = [];
+    for (const t of body.terms ?? []) {
+      keepRow(account);
+      rows.push({ prefix: lit(u.prefix), graph: lit(u.graph), term: wireTerm(t.term), roles: lit((t.roles ?? []).join(' ')) });
+    }
+    listed.set(key(u.prefix, u.graph), { rows, total: Number(body.cardinality?.value ?? rows.length) });
+  }));
+  const shown = used.filter(u => listed.has(key(u.prefix, u.graph)));
+  return {
+    variables: [ 'prefix', 'graph', 'term', 'roles' ],
+    rows: shown.flatMap(u => listed.get(key(u.prefix, u.graph)).rows),
+    graphs: holding,
+    note: `${lines.join('; ')}. Listed${role === 'any' ? '' : ` as ${role}`}: ` +
+      shown.map(u => { const l = listed.get(key(u.prefix, u.graph)); return `${u.graph} ${l.rows.length} of ${l.total}`; }).join(', '),
+    error: failureText(failures),
+  };
+}
+
+/** The summary's namespace inventory, as a section for the Markdown card. */
+function namespaceSection(ns) {
+  const lines = [
+    '## Namespaces',
+    '',
+    'From the summary\'s JSON form: distinct IRIs under each prefix this graph declares, by position. IRIs under a namespace the graph does not declare, such as another graph\'s, are counted only below; terms counts any prefix in every graph.',
+    '',
+    '| prefix | namespace | IRIs | subjects | predicates | objects |',
+    '|---|---|---:|---:|---:|---:|',
+    ...ns.namespaces.map(n => `| ${n.prefix ?? ''} | \`${n.namespace}\` | ${n.distinct_iris} | ${n.subject} | ${n.predicate} | ${n.object} |`),
+  ];
+  const residual = [ 'subject', 'predicate', 'object' ].filter(r => ns.roles?.[r]).map(r => `${ns.roles[r].residual} of ${ns.roles[r].distinct_iris} ${r} IRIs`);
+  if (residual.length) {
+    lines.push('', `Under no declared prefix: ${residual.join('; ')}.`);
+  }
+  return lines.join('\n');
+}
 
 function patternTerm(text) {
   if (text === null || text === undefined) {
