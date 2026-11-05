@@ -385,6 +385,16 @@ model does not need. Checked in a browser against the live endpoint; not with a 
     18 (GitPython, Jinja2, Pillow, PyPDF2, PyYAML, Requests) are capitalised IRIs with no
     triples; their lowercase IRIs have versions, every one with vulnerabilities. Haiku joined
     them by name and said so (D15). By securechainkg's own IRIs it is 12 of 18.
+  - *2026-11-05, with D17's `overlap`:* Haiku 5.5 at its default effort answered right first
+    time, and named all three models where the slide named one. CESM2's 12 packages with
+    version data, each checked: numpy 8 CVEs on 114 of 153 versions, lxml 6 on 593 of 609,
+    torch 6 on 39 of 40, scipy, setuptools and ujson 3, tqdm 2, dash, dask, distributed,
+    docutils and pandas 1. GFDL-CM4 (numpy, setuptools) and GFDL-ESM4 (numpy, scipy,
+    setuptools) match too. It left the six capitalised IRIs out as unchecked, rather than
+    joining them by name, and said that `dependsOn` names a package while CVEs are on versions.
+    One run; item 2's harness should repeat it. At about 1/35 of Opus 5.5's cost (§3 item 4),
+    this is the case for Haiku 5.5 on cross-graph questions when the page does the check in
+    code.
 
 ## 3. Open
 
