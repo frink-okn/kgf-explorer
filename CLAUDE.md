@@ -37,7 +37,8 @@ before changing anything, and the decision (D1–D15) a change touches.
   never guessed from a value's shape.
 - Labels come from each graph's `/labels` and sit beside a table, never in it.
 - Caps come from the endpoint's service descriptor; never hard-code one. The visitor's budget
-  bounds every run, and a run that reaches it stops, keeps what arrived and says so.
+  bounds every run, and a run that reaches it stops, keeps what arrived (a bound fetch, whole
+  batches) and says so.
 - Errors from a server are its problem document, verbatim.
 - Model output is sanitized before it is rendered. The key goes only to the provider the
   visitor chose. Nothing is hosted.

@@ -91,7 +91,9 @@ row limits come from the endpoint's descriptor; no number of ours stands in for 
 visitor's budget — requests, MiB received, rows kept, seconds, model turns per message — bounds
 every run. A run that reaches a budget stops, keeps what arrived and says so; a message that
 reaches its model turns gets one last turn with tools off, told to answer from the tables it
-has and say what it did not get to.
+has and say what it did not get to. A bound fetch keeps whole batches (2026-11-06): a batch cut
+part way holds some of its values' rows and not others, nothing says which, and a resume that
+left out the values present lost the rest (D18).
 
 **D11. The DuckDB is locked** (kgfq D6 in a tab). External access, extension autoinstall and
 autoload off, `lock_configuration` on, before any SQL a model wrote runs; the text is wrapped
@@ -350,7 +352,7 @@ transcripts are set aside.
   NCIT's one accepted use) and chose none. SPARQL: it declined, ran the operations, and gave
   the pattern.
 
-What cost calls, and what would remove it (proposed, not built):
+What cost calls, and what would remove it (proposed; 1 and 2 built below):
 1. An IRI made in `sql` comes back as plain text. 3 of the 4 path cases did it (a `CASE`, `'…'
    || dtx`, `unnest([…])`), and the bound fetch after it matched nothing for those values: 6
    of 18, 0 of 8 three times, 0 of 15. Each cost 2 to 11 calls to see why. The description
@@ -379,6 +381,43 @@ What cost calls, and what would remove it (proposed, not built):
 7. Tool errors: 11 in `sql` (7 in the NC run, DuckDB's list and regex functions), one `search`,
    one `describe` with a limit of `"30\n</"`, Qwen's markup leaking into an argument. Each time
    the verbatim error led to the fix (D14). No change.
+
+*Then, 1 and 2 built.* An `sql` result whose text values fell to plain text says so in its
+`about`: "Plain text, not IRIs: sw (2 of 18 rows)…", with `'iri' AS sw_kind` as the way out;
+the description says the same. A mixed column is counted too: the climate run's `CASE` kept 12
+IRIs found in its input and turned 6 to text, and its preview showed no difference. A bound
+fetch that stops keeps only its finished batches (D10) and counts what it left out
+(`bindings.dropped`); the model is told the rows are complete for the values checked and how to
+go on, or, when no batch finished, to bind over fewer values. Checked in a browser against
+apps.okn.us: the climate run's `CASE` over CESM2's 18 dependencies gave the note, and the same
+with `sw_kind` gave IRIs, 14 of 18 labeled; versions bound to their CVEs under a 3,000-row
+budget kept the first batch whole (1,000 values, 2,136 rows), left out the second's 864, and
+showed "1840 not checked"; the resume that broke the PFAS run (the versions with no rows here,
+2,084) then gave 4,688 more, together 6,824 distinct pairs over 2,408 versions, the unbroken
+fetch's numbers. The model's view of three stopped receipts checked in node. Not checked: a
+model reading either note.
+
+*The four path cases again on Qwen, with both* (the same budgets; two keys expired first, and
+those runs are set aside). 95 model calls against 119, 5,534,637 prompt tokens against
+9,517,689, 3,473 s of model time against 4,414. One run each, and the PFAS run took another
+method, so the difference is not the changes' alone.
+- An IRI built in `sql` and bound to nothing: 0 of 4 cases, against 3 of 4. The note did not
+  cause it: it never came up before a bind. Qwen stated kinds itself, 3 of its 48 `sql` calls
+  against 1 of 65 (`o_kind AS pkg_kind`, `subject_kind AS pkg_kind`, `'iri' AS iri_kind`); the
+  description now gives the way. The note came up 9 times, 8 on columns that are text (names,
+  DTXSID strings, a column of words), the ninth a final table; none misled the model.
+- No bound fetch stopped, so the second change was not reached by a model.
+- Answers. Climate: right, 17 calls, 254 s, and it called `overlap` (2 rows). Liver: 17 CL,
+  via `RO_0002323` (106 parts) checked against `BFO_0000050`. NC: 14 again, a different 14:
+  Tex-Care Medical in, Nester Hosiery out; 15 across the two runs, and §2 does not list its
+  16 by name to check them against. PFAS: answered
+  at 30 calls, no closing turn; it joined observations to water samples directly instead of
+  subtracting the others, and found the same 32 and the two insecticides by DTXSID. Its first
+  line says "34 PFAS" and its list says 32. Two runs by two methods agree against §2's 31 by
+  CAS; which chemical the CAS join lacks is still not checked.
+- New: the PFAS run gave `fetch` a `limit`, which it does not take, and got 100,000 rows to the
+  budget. The schemas say `additionalProperties: false` and the page does not check. Refusing
+  an input a tool does not take, by name, would have cost one call.
 
 ## 2. Measured (2026-09-24 to 2026-09-26, apps.okn.us, kgf 0.3.0)
 

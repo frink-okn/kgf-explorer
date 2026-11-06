@@ -307,7 +307,9 @@ function renderTable(table) {
       b ? el('span', {}, `bound: ${Object.entries(b.columns).map(([ v, c ]) => `?${v} ← ${b.table}.${c}`).join(', ')} · ${b.tuples} values in ${b.chunks} batches`) : null,
       b ? el('span', { class: b.unmatched ? 'warn' : '' }, b.unmatched ?
         `${b.unmatched} of ${b.checked} matched nothing, e.g. ${b.unmatched_sample.slice(0, 3).join(' · ')}` :
-        `all ${b.checked} matched`) : null));
+        `all ${b.checked} matched`) : null,
+      b && b.checked < b.tuples ? el('span', { class: 'warn' }, `${b.tuples - b.checked} not checked` +
+        (b.dropped ? `; ${b.dropped} rows of the batch that did not finish left out` : '')) : null));
   }
   if (table.sqlError) {
     details.append(el('pre', { class: 'error' }, `Not available to sql: ${table.sqlError}`));

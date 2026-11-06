@@ -69,6 +69,8 @@ export function typedLiteral(value) {
  * SQL output back as terms. A column x that arrives with x_kind is reassembled from its
  * companions. A text column without them takes the kind its values have in the tables the
  * query read, when every value there has exactly one encoding; otherwise it is plain text.
+ * `plain` counts, per column, the text values that fell to plain text, so the result can say
+ * so: an IRI built in SQL is text, and a fetch bound to it then matches nothing (plan D18).
  */
 export function termsFromSql(names, rows, inputs) {
   const present = new Set(names);
@@ -89,6 +91,7 @@ export function termsFromSql(names, rows, inputs) {
     const seen = index.get(value);
     return seen && seen.size === 1 ? [ ...seen ][0] : null;
   };
+  const plain = {};
   const out = rows.map(row => Object.fromEntries(variables.map(v => {
     const value = row[v];
     if (explicit.has(v)) {
@@ -96,11 +99,15 @@ export function termsFromSql(names, rows, inputs) {
     }
     if (typeof value === 'string') {
       const encoding = encodingOf(value);
-      return [ v, encoding ? fromColumns(value, ...JSON.parse(encoding)) : typedLiteral(value) ];
+      if (encoding) {
+        return [ v, fromColumns(value, ...JSON.parse(encoding)) ];
+      }
+      plain[v] = (plain[v] ?? 0) + 1;
+      return [ v, typedLiteral(value) ];
     }
     return [ v, typedLiteral(value) ];
   })));
-  return { variables, rows: out };
+  return { variables, rows: out, plain };
 }
 
 /** Stored value → the distinct encodings ([kind, lang, datatype]) it has in these tables. */

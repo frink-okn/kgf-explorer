@@ -171,6 +171,14 @@ export function summarizeForModel(result) {
     out.bound_values = { from: `${b.table} (${Object.entries(b.columns).map(([ v, c ]) => `?${v} ← ${c}`).join(', ')})`, sent: b.tuples, matched: b.matched, unmatched: b.unmatched };
     if (b.checked < b.tuples) {
       out.bound_values.not_checked = b.tuples - b.checked;
+      // An unfinished batch's rows were left out (runFetch), so a resume that leaves out the
+      // values already present is exact.
+      const n = x => x.toLocaleString('en-US');
+      out.bound_values.rest = b.checked === 0 && b.dropped ?
+        `No rows kept: the first batch, ${n(b.batch)} values, did not finish within the budget, and its ${n(b.dropped)} rows were left out. Bind over fewer values at a time.` :
+        `Rows here are complete for the ${n(b.checked)} values checked and hold none for the other ${n(b.tuples - b.checked)}` +
+        (b.dropped ? `; ${n(b.dropped)} rows of the batch that did not finish were left out` : '') +
+        `. To go on, bind the same pattern over the values of ${b.table} with no rows here; those that matched nothing will match nothing again.`;
     }
     if (b.unmatched) {
       out.bound_values.unmatched_sample = b.unmatched_sample;

@@ -223,6 +223,18 @@ export async function runFetch({ endpoint, input, pattern, bind, budget, stop })
   // it is counted here.
   const matched = new Set();
   let checked = 0;
+  // A batch that stops part way holds some of its values' rows and not others, and nothing
+  // says which. Its rows go, so the table is whole for every value it counts as checked, and
+  // a resume that leaves out the values already present loses nothing (plan D18: a run that
+  // resumed so told the person 54 rows at most were missing; a batch's could be).
+  let begun = 0;
+  let dropped = 0;
+  const dropUnfinished = () => {
+    if (bind && rows.length > begun) {
+      dropped += rows.length - begun;
+      rows.length = begun;
+    }
+  };
   const keep = (page, offset) => {
     for (const raw of page.rows ?? []) {
       const row = {};
@@ -273,6 +285,8 @@ export async function runFetch({ endpoint, input, pattern, bind, budget, stop })
       let offset = 0;
       for (const chunk of chunks(bind.tuples, vars, body, caps.max_bindings ?? 200, endpoint.descriptor.budgets?.max_request_bytes ?? 2 ** 20)) {
         extra.bindings.chunks++;
+        extra.bindings.batch = Math.max(extra.bindings.batch ?? 0, chunk.length);
+        begun = rows.length;
         let cursor = null;
         do {
           const request = { ...body, bindings: { vars, rows: chunk }, ...(cursor ? { cursor } : {}) };
@@ -285,15 +299,18 @@ export async function runFetch({ endpoint, input, pattern, bind, budget, stop })
         }
         offset += chunk.length;
         checked = offset;
+        begun = rows.length;
       }
     }
     if (full) {
+      dropUnfinished();
       account.abort('max_rows', `${rows.length} rows kept`);
     }
     outcome = account.exceeded ?
       { contract: 'aborted', rows: rows.length, budget: account.exceeded } :
       { contract: 'complete', rows: rows.length };
   } catch (error) {
+    dropUnfinished();
     outcome = account.exceeded ?
       { contract: 'aborted', rows: rows.length, budget: account.exceeded, error: message(error) } :
       { contract: 'error', rows: rows.length, error: message(error) };
@@ -314,6 +331,7 @@ export async function runFetch({ endpoint, input, pattern, bind, budget, stop })
       matched: checked - unmatched.length,
       unmatched: unmatched.length,
       unmatched_sample: unmatched.slice(0, 8).map(i => bind.tuples[i].join(' ')),
+      ...(dropped ? { dropped } : {}),
     });
   }
   return { rows, variables, receipt: receipt({ operation: 'fetch', input, sources, outcome, account, budget, started, extra }) };

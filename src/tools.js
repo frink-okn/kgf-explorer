@@ -207,6 +207,14 @@ async function runSql(input, ctx) {
     outcome = result.truncated ?
       { contract: 'aborted', rows: result.rows.length, budget: 'max_rows' } :
       { contract: 'complete', rows: result.rows.length };
+    const plain = Object.entries(result.plain ?? {});
+    if (plain.length) {
+      // Stated, never guessed (kgfq C6): the page never reads an IRI off a value's shape, so it says
+      // which columns are text and how to make them IRIs.
+      const [ first ] = plain[0];
+      outcome.note = `Plain text, not IRIs: ${plain.map(([ c, n ]) => `${c} (${n.toLocaleString('en-US')} of ${result.rows.length.toLocaleString('en-US')} rows)`).join(', ')}. ` +
+        `These values had no ${first}_kind beside them and are not in the tables read with one kind. If they are IRIs, select 'iri' AS ${first}_kind with ${first}.`;
+    }
   } catch (error) {
     outcome = { contract: 'error', rows: 0, error: error instanceof Error ? error.message : String(error) };
   }
@@ -476,7 +484,7 @@ export const TOOLS = [
   {
     name: 'sql',
     title: 'SQL over tables',
-    description: 'One DuckDB SELECT over this session\'s tables, which are SQL tables named t1, t2, …. Each term column x holds the value as text (CAST for arithmetic) beside x_kind (iri, literal or bnode), x_lang and x_datatype. A result column keeps its kind when you select x_kind with it, or when its values appear in the tables read with one kind each; other text comes back as a plain literal, numbers as typed literals. Use it to join tables, filter, group and count. The result is a new table. Nothing outside the session\'s tables can be read.',
+    description: 'One DuckDB SELECT over this session\'s tables, which are SQL tables named t1, t2, …. Each term column x holds the value as text (CAST for arithmetic) beside x_kind (iri, literal or bnode), x_lang and x_datatype. A result column keeps its kind when you select x_kind with it, or when its values appear in the tables read with one kind each; other text comes back as a plain literal, and the result says which columns did; to make IRIs from text, select \'iri\' AS x_kind beside x. Numbers come back as typed literals. Use it to join tables, filter, group and count. The result is a new table. Nothing outside the session\'s tables can be read.',
     input_schema: schema({ query: { type: 'string', description: 'A single SELECT; WITH … SELECT is fine.' } }, [ 'query' ]),
     run: runSql,
   },
