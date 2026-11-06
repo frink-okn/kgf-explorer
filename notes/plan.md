@@ -584,6 +584,32 @@ model does not need. Checked in a browser against the live endpoint; not with a 
      are only second sites of two firms already matched (Elastic Therapy, Precision Fabrics).
    - OKN-MCP's join table holds this pair as a name join confirmed by ZIP (I3); the page has
      no join table, and Haiku reached the same method on its own.
+
+   *2026-11-06, Qwen 3.8 27B on RENCI's MaaS:* the model the sizing above left untried, served
+   on RENCI's cluster behind its model gateway, with a key from RENCI support. The custom-URL
+   adapter got "Connection error.", the SDK's word for a failed fetch: the gateway checks the
+   key on the preflight too (realms `api-keys` and `openshift-identities`) and answers `401`
+   with no CORS headers, and a browser sends no credentials on a preflight. A shim on
+   127.0.0.1 that answers the preflight and forwards the rest got answers. MaaS's CORS need
+   not change for the gate, which calls the model from its own server and answers the
+   preflight itself, pinned to the page's origin. Three things the sketch does not cover:
+   - The endpoint resolves to a private address. The gate runs inside RENCI's network, not on
+     an outside host.
+   - The key is rate-limited. One full-mode question drew five `429`s (an 18-byte body), each
+     on the call right after one of 9 s or more. The OpenAI SDK retries twice by default
+     (`src/llm.js` sets no `maxRetries`); each retry went through within a second, so the page
+     showed none. Every visitor shares the gate's key, so its limit is the service's. Its terms
+     (requests or tokens, over what window) are to be asked; the gate queues and backs off
+     rather than pass a `429` on.
+   - Keeping a session on one server for prefix caching is not the gate's to do here: the
+     gateway picks the replica. Whether vLLM's prefix caching is on, and over how many
+     replicas, is to be asked.
+
+   Timings, from the shim's log: 9 calls answered in 1.9 to 23.9 s, 96 s of model time over 2
+   minutes; no response over 4.5 kB, so the time is prefill and thinking. Which question,
+   whether it was answered right and whether thinking was on were not recorded. One question,
+   one run. macOS's `/usr/bin/curl` (LibreSSL 3.3.6) fails the TLS handshake with this host;
+   OpenSSL, Python and the browser do not.
 5. **Claude and ChatGPT as hosts.** Published as a claude.ai artifact, the page could call
    Claude on the viewer's plan through the `sample` capability (unchecked: free plans, and
    whether the sandbox reaches the KGF endpoint). An MCP App would put the operations inside
