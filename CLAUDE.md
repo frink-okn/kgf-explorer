@@ -13,6 +13,9 @@ before changing anything, and the decision (D1–D15) a change touches.
   unmodified. `KGF_SPARQL` points elsewhere.
 - Serve with `python3 serve.py 8765` (`npm run serve`): `dist/` with no-cache headers. A plain
   static server can serve a stale `index.html` after a rebuild. `file://` does not work.
+- Served by `serve.py`, every chat is written to `runs/` as a transcript (plan D18);
+  `python3 test/digest.py runs/` reads them. Changes to prompts, tools or what the page asks of
+  KGF cite runs, not impressions. `runs/` is never committed.
 - `dist/` is built, never edited or committed.
 
 ## Tests: real servers, never mocks

@@ -168,7 +168,8 @@
     </details>
     <div id="transcript"></div>
     <textarea id="prompt" placeholder="Ask about the graphs — e.g. which genes are associated with asthma, and are any of them studied in GeneLab?"></textarea>
-    <div class="row"><button id="send" class="primary">Send</button><button id="chat-stop" disabled>Stop</button><button id="chat-clear">New chat</button></div>
+    <div class="row"><button id="send" class="primary">Send</button><button id="chat-stop" disabled>Stop</button><button id="chat-clear">New chat</button><button id="chat-export" title="Download this conversation as a transcript: prompt, tools, every model call, every result the model saw, and the receipts">Transcript</button></div>
+    <p id="record-note" class="hint" hidden></p>
   </section>
 </main>
 <script src="app.js"></script>

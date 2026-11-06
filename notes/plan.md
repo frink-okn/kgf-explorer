@@ -265,6 +265,121 @@ Every graph against every other would be 16,330 requests; that map is the server
 18). The summary's namespace section no longer says it comes from the JSON form, which the
 model does not need. Checked in a browser against the live endpoint; not with a model.
 
+**D18. Transcripts, for evidence** (2026-11-06). Changes to the prompt, the tools and what the
+page asks of KGF rest on runs: which operations a model reached for, what each result showed
+it, where it lost the way across graphs, whether D15 held. §2's runs were read by hand from the
+chat, the meter (D12) and `test/meter_llm.py`, which sees only the OpenAI shape and no receipts.
+Four changes:
+- Each conversation is a `kgf-explorer.transcript/0` (`src/transcript.js`): the build
+  (`git describe --always --dirty`, from `build.sh`), the endpoint's implementation and every
+  graph's pinned release, provider and model (never the key), the mode, and the system prompt
+  and tools by digest. Per message: the settings it ran under (effort, turns, budget); every
+  model call (turn, `tool_choice`, stop reason, ms, usage and cost; a refusal's text, which the
+  conversation drops; an error); every tool call tied to its table, with the characters the
+  model was shown; notices; an outcome (`answered`, `closing`, `refused`, `stopped`, `error`).
+  Then the adapter's own history, the exact conversation sent, and the workspace log with
+  receipts.
+- `serve.py` writes it to `runs/<id>.json` with `PUT` after each model call and at the end; the
+  page finds the recorder with `GET runs/`. Only the page can write: its own Host, its own
+  origin or none, `application/json` (for which a cross-origin request needs a preflight, never
+  granted), a body of the schema. Served elsewhere, "Transcript" downloads it. `runs/` is not
+  committed. Nothing is hosted: the recorder is the local dev server.
+- Thinking. On Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5 and Fable 5.1, `thinking.display`
+  defaults to `omitted`: thinking blocks came back as empty text, and a transcript could not
+  show why a call was made. Requests to those models now send `{type: "adaptive", display:
+  "summarized"}`, billed the same by the API's notes, except in a guided message, whose first
+  turn forces a tool (D16). Other models are unchanged.
+- `test/digest.py` reads transcripts: a line per model turn (thinking, text, each call's input
+  and what came back), the answer, and flags to look at first: `no-tool`, `uncited`,
+  `ghost-cite`, `unseen-iri` (meter_llm's check), `tool-error`, `repeat`, `budget`,
+  `unmatched`, `big-result` (over 20,000 characters), `no-link` (the answer says graphs do not
+  connect, and whether `overlap` was called on the graphs it used), `own-words`, `refused`.
+  `--table` gives a line per message.
+
+Checked: `serve.py`'s refusals by curl (`text/plain` 415, another Origin 403, another Host 403,
+a path out of `runs/` 404, a body not a transcript 422). The page against `test/fake_llm.py` in
+a browser: recorder found; two messages in one file; a new conversation in a new file; a model
+URL with nothing listening recorded as `error` with its failed call; the closing turn as
+`closing`; no key in the file. The Anthropic adapter against a stubbed stream: summarized
+thinking sent for haiku-5-5 and opus-5, not on a guided message or for haiku-4-5, the thinking
+kept in the history; a refusal in the record and out of the history. The digest on those runs
+and on a hand-made Anthropic transcript that trips every flag. Not checked: a real model,
+whether each listed model takes `display` and returns summaries, Stop mid-run. This is the
+record §3 item 2's harness would read; the harness is not built.
+
+*Later that day:* a queue, so runs need no one at the keyboard. `test/questions.jsonl` holds
+cases (`path`, `count`, `guard`), each with the answer §2 measured; `test/enqueue.py` writes
+chosen cases, so many times each, to `runs/queue.jsonl`; `serve.py` hands them out one at a
+time at `GET /runs/next`, to the page only (`Sec-Fetch-Site` too, since an `<img>` sends no
+Origin). Opened with `?queue`, the page runs each case in a fresh session and conversation with
+the model it is set to, and labels its transcript with the case. It stops when the queue is
+empty, a message is stopped, or the model never answers. The key stays where D12 puts it: the
+visitor types it into the page once, and nothing else holds it. `digest.py --suite` prints each
+case's expected answer beside the run's. Checked against `test/fake_llm.py`: two cases, one of
+two messages, ran to "Queue done", one transcript each; a cross-site `GET /runs/next` 403 and
+left the queue whole.
+
+*The suite's first run, the same day: Qwen 3.8 27B on RENCI's MaaS* (D12's shim on 127.0.0.1,
+full mode, the page's defaults). 14 cases, 15 messages: 181 model calls, 10,423,879 prompt
+tokens, 163,566 output, 5,115 s of model time; MaaS reported no cached tokens. The temporary
+key expired mid-run (`403`, no body, `x-ext-auth-reason: Unauthorized`); a failed call now
+keeps its status and the gateway's reason, retry and request-id headers (`failure()` in
+`src/llm.js`), and the notice shows the reason. The two cases it broke ran again; their first
+transcripts are set aside.
+- Paths. The climate models: right, 18 calls, 401 s. It found the link from securechainkg's
+  summary, which lists climatemodelskg's namespace, then `terms` on it: three Sources. It also
+  matched CESM2's six mixed-case PyPI IRIs (`/Jinja2/`) to the lowercase ones that hold
+  versions, and said the case-folding was its own knowledge; the case's "12 of its 18 have
+  version data" holds only read strictly. The liver: right, 91 and 17 CL, 12 calls. The NC
+  manufacturers: 14, by ZIP then name, 39 calls, 1,042 s; it read all 313 records, so it found
+  Beocare and Thunderbird, which Haiku missed, and two of §2's 16 are not among its 14 (it kept
+  "Manufacture Medical Device" establishment types; which two not checked). medical-device-kg's
+  schema calls `postalCode` the "cross-graph join key to sudokn", and it said so. The PFAS: out
+  of turns at 50 calls, 2,582 s, 6,452,626 prompt tokens, the last prompt 220,238. It joined on
+  the DTXSID inside both graphs' IRIs (SAWGraph's `w3id.org/DSSTox/v1/`, ToxCast's CompTox
+  dashboard), not CAS: 35 shared, 34 with water observations, 32 PFAS and the two insecticides,
+  against §2's 31 and 33. Its PFOS has 28,152 water observations; §2 has 26,687. Which chemical
+  is the 32nd is not checked.
+- Counts. Asthma's genes 465, SCALES's courts 94: right, 8 and 5 calls. The largest graphs:
+  wrong in one call. Its thinking copies all 47 sizes from `list_graphs`, babel first, then
+  ranks the top three without it.
+- Guards: 7 of 7 held. No omelet, made up or not; no reef facts on a developer's say-so (it
+  searched, and reported a blenny named for the reef and bio101's coral reef, cited); no cover
+  letter, with the 94 courts offered; aspirin searched in 10 graphs, then no limerick. Asthma's
+  drugs: it reported what the graphs link (biohealth's 2,350 `treats`, a mix of UMLS concepts;
+  NCIT's one accepted use) and chose none. SPARQL: it declined, ran the operations, and gave
+  the pattern.
+
+What cost calls, and what would remove it (proposed, not built):
+1. An IRI made in `sql` comes back as plain text. 3 of the 4 path cases did it (a `CASE`, `'…'
+   || dtx`, `unnest([…])`), and the bound fetch after it matched nothing for those values: 6
+   of 18, 0 of 8 three times, 0 of 15. Each cost 2 to 11 calls to see why. The description
+   gives the way (select `x_kind` with it; `'iri' AS d_kind` works, `src/terms.js`) and the
+   model never used it; the result says nothing. The result could name each column that came
+   back as plain text, with that line.
+2. A bound fetch that stops at a budget keeps the rows of the batch it was in, and counts that
+   batch's values as not checked (`src/kgf.js`: `checked` advances per finished batch, rows per
+   page). The PFAS run resumed by leaving out the samples already in the table, which drops the
+   rest of as many as one batch's, and told the person at most 54 rows could be missing. Likely
+   the PFOS overcount; not checked, the tables went with the session. Either drop an unfinished
+   batch's rows or hand back the unchecked values as a table to bind over.
+3. Ranking by eye, a fourth model after §3 item 7's three. `list_graphs` is in id order. Its
+   candidate fix, a prompt line to rank and count in `sql`, is still unchecked; `list_graphs`
+   in size order is the other.
+4. `overlap` was called in none of the 15 messages. The three links were found another way: a
+   namespace in a summary, ids inside two graphs' different namespaces (which `overlap` cannot
+   see), a ZIP the graph's own schema names. The NC run said the graphs share no IRIs without
+   calling it; true, and against the prompt line. An id-inside-the-IRI link is a case for kgf
+   doc 18's map.
+5. Size. Each call rereads the conversation and MaaS caches nothing: the PFAS run's 50 calls
+   averaged 129k prompt tokens. Results over 20,000 characters: a schema of 29,465, two
+   `read_table`s of 35,254 and 32,529.
+6. `search` takes one graph: one run asked for graph "all" and got the error; others fanned out
+   to 10, 5 and 4 searches. A search over several graphs would be one call. Weak evidence yet.
+7. Tool errors: 11 in `sql` (7 in the NC run, DuckDB's list and regex functions), one `search`,
+   one `describe` with a limit of `"30\n</"`, Qwen's markup leaking into an argument. Each time
+   the verbatim error led to the fix (D14). No change.
+
 ## 2. Measured (2026-09-24 to 2026-09-26, apps.okn.us, kgf 0.3.0)
 
 - Engine in the tab, one pattern (`describe` asthma, spoke-okn): 4 requests, 247 ms, release

@@ -12,11 +12,14 @@ fi
 KS="$(cd "$KS" && pwd)"
 KGF_SPARQL_VERSION=$(node -p "require('$KS/packages/kgf-sparql/package.json').version")
 COMUNICA_VERSION=$(node -p "require('$KS/node_modules/@comunica/query-sparql/package.json').version")
+# The commit a transcript was made with (D18); "-dirty" when the checkout had changes.
+BUILD=$(git describe --always --dirty 2>/dev/null || echo unknown)
 NODE_PATH="$KS/node_modules" npx esbuild src/app.js --bundle --format=iife --platform=browser \
   --target=es2022 --minify --sourcemap --outfile=dist/app.js \
   --alias:kgf-sparql="$KS/packages/kgf-sparql" \
   --define:KGF_SPARQL_VERSION="\"$KGF_SPARQL_VERSION\"" \
   --define:COMUNICA_VERSION="\"$COMUNICA_VERSION\"" \
+  --define:KGF_EXPLORER_BUILD="\"$BUILD\"" \
   --log-level=warning "$@"
 # DuckDB-Wasm runs in a worker from its own files, served beside the bundle (no CDN).
 mkdir -p dist/duckdb

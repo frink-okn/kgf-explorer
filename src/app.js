@@ -4,10 +4,11 @@
 
 import { GUIDED_BY_NAME, GUIDED_SYSTEM, GUIDED_TOOLS, guidedToolsFor } from './guided.js';
 import { Endpoint } from './kgf.js';
-import { DEFAULT_TURNS, PROVIDERS, createChat } from './llm.js';
+import { DEFAULT_TURNS, PROVIDERS, createChat, failure } from './llm.js';
 import { linkTables, renderMarkdown } from './markdown.js';
 import { Sql } from './sql.js';
 import { TOOLS, TOOL_BY_NAME } from './tools.js';
+import { Recorder, Transcript, findRecorder } from './transcript.js';
 import { Workspace, summarizeForModel } from './workspace.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -93,6 +94,9 @@ const state = {
   running: null,
   chat: null,
   chatAbort: null,
+  // The conversation as evidence (D18), and serve.py's recorder when the page is served by it.
+  transcript: null,
+  recorder: null,
   // 'full' (every operation, for a strong model) or 'guided' (D16: handles, for a weaker one).
   mode: 'full',
 };
@@ -132,6 +136,7 @@ async function connect() {
     renderResults();
   });
   state.chat = null;
+  state.transcript = null;
   const n = state.endpoint.graphs.size;
   const impl = state.endpoint.descriptor.implementation;
   const status = `${n} graphs · kgf ${impl?.kgf ?? '?'} · releases pinned for this session`;
@@ -398,6 +403,19 @@ function downloadLog() {
   a.remove();
 }
 
+/** This conversation as a transcript (D18), for a page served without serve.py's recorder. */
+function downloadTranscript() {
+  if (!state.transcript?.record.messages.length) {
+    bubble('notice', 'No conversation yet: a transcript starts with the first message.');
+    return;
+  }
+  const blob = new Blob([ state.transcript.json() ], { type: 'application/json' });
+  const a = el('a', { href: URL.createObjectURL(blob), download: `${state.transcript.record.id}.json` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
 function kib(bytes) {
   return bytes < 1024 ? `${bytes} B` : bytes < 2 ** 20 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / 2 ** 20).toFixed(1)} MiB`;
 }
@@ -468,6 +486,9 @@ function ensureChat() {
     state.chat = createChat(settings);
     state.chat.usage = [];
     state.chatSignature = signature;
+    state.transcript = new Transcript({ endpoint: state.endpoint, settings, mode: state.mode });
+    state.transcript.chat = state.chat;
+    state.transcript.workspace = state.workspace;
   }
   return state.chat;
 }
@@ -563,17 +584,24 @@ function queueRender(node) {
   }
 }
 
-async function send() {
-  const text = $('#prompt').value.trim();
+/**
+ * Sends the prompt box, or `text`, as the next message. Resolves to the message's transcript
+ * entry when it ends, or null when it did not start. `case` labels the conversation (D18).
+ */
+async function send({ text = $('#prompt').value, case: label = null } = {}) {
+  text = text.trim();
   if (!text || !state.workspace || state.chatAbort) {
-    return;
+    return null;
   }
   saveSettings();
   try {
     ensureChat();
   } catch (error) {
     bubble('notice', error.message);
-    return;
+    return null;
+  }
+  if (label) {
+    state.transcript.record.case ??= label;
   }
   $('#prompt').value = '';
   bubble('user', text);
@@ -582,16 +610,23 @@ async function send() {
   $('#send').disabled = true;
   $('#chat-stop').disabled = false;
   const chat = state.chat;
+  const transcript = state.transcript;
   const calls = [];
   let current = null;
+  let failed = null;
   const tools = guided() ? guidedToolsFor(state.endpoint) : TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
+  const system = (guided() ? GUIDED_SYSTEM : SYSTEM)(state.endpoint.origin);
+  const maxTurns = Number($('#b-turns').value) || DEFAULT_TURNS;
+  // Read per message, like the turns: a different effort is the same model, so the conversation stays.
+  const effort = $('#effort').value || null;
+  const message = transcript.begin(text, { system, tools, effort, maxTurns, budget: budget() });
+  const save = () => state.recorder?.save(transcript);
   try {
     await state.chat.send(text, {
-      system: (guided() ? GUIDED_SYSTEM : SYSTEM)(state.endpoint.origin),
+      system,
       tools,
-      maxTurns: Number($('#b-turns').value) || DEFAULT_TURNS,
-      // Read per message, like the turns: a different effort is the same model, so the conversation stays.
-      effort: $('#effort').value || null,
+      maxTurns,
+      effort,
       // Guided mode answers only after looking: lfm2.5:8b and qwen3.5:9b wrote an omelet recipe otherwise.
       toolFirst: guided(),
       signal: abort.signal,
@@ -603,16 +638,30 @@ async function send() {
         current.source += delta;
         queueRender(current);
       },
-      onNotice: note => bubble('notice', note),
+      onNotice: note => {
+        message.notices.push({ at: new Date().toISOString(), text: note });
+        bubble('notice', note);
+      },
       onUsage: call => {
         calls.push(call);
         chat.usage.push(call);
       },
+      onCall: record => {
+        message.calls.push({ at: new Date().toISOString(), ...record });
+        save();
+      },
       execute: async(name, input) => {
         const chip = bubble('tool', el('b', {}, name), ' ', el('code', {}, JSON.stringify(input)), ' …');
         current = null;
+        const started = Date.now();
         const result = await state.workspace.run(name, input, { actor: 'assistant', budget: budget(), stop: abort.signal });
         const summary = summarizeForModel(result);
+        // What the model was shown is in the history; this ties the call to its table and says how much it was.
+        message.tools.push({
+          turn: message.calls.length - 1, name, table: result.table?.id ?? null, read: result.read ? input.table : null,
+          ms: Date.now() - started, contract: result.table?.receipt.outcome.contract ?? (result.read?.error ? 'error' : 'complete'),
+          rows: result.table?.rows.length ?? result.read?.rows?.length ?? null, chars: JSON.stringify(summary).length,
+        });
         chip.lastChild.remove();
         if (result.table) {
           const id = result.table.id;
@@ -630,15 +679,63 @@ async function send() {
       },
     });
   } catch (error) {
-    bubble('notice', abort.signal.aborted ? 'Stopped.' : `Error: ${error.message ?? error}`);
+    failed = error;
+    // A reason the server gave only in a header goes with its message (D14).
+    const reason = failure(error).headers?.['x-ext-auth-reason'];
+    bubble('notice', abort.signal.aborted ? 'Stopped.' : `Error: ${error.message ?? error}${reason ? ` (${reason})` : ''}`);
   } finally {
     // A stopped or failed message still shows what its finished calls used.
     if (calls.length > 0) {
       bubble('meter', ...meterView(calls, chat.usage));
     }
+    message.finished = new Date().toISOString();
+    message.error = failed ? String(failed.message ?? failed) : null;
+    message.outcome = abort.signal.aborted ? 'stopped' : failed ? 'error' :
+      message.calls.some(c => c.stop === 'refusal') ? 'refused' :
+        message.calls.some(c => c.tool_choice === 'none') ? 'closing' : 'answered';
+    save();
     state.chatAbort = null;
     $('#send').disabled = false;
     $('#chat-stop').disabled = true;
+  }
+  return message;
+}
+
+/**
+ * The cases serve.py queues (D18), when the page is opened with `?queue`: each in a fresh
+ * session and conversation, its messages in order, until the queue is empty, a message is
+ * stopped, or the model never answers. Only serve.py answers runs/next, and only to this page.
+ */
+async function runQueue() {
+  bubble('notice', 'Running the cases queued in runs/queue.jsonl, each in a new session.');
+  for (let done = 0; ; done++) {
+    const response = await fetch('runs/next', { cache: 'no-store' });
+    if (response.status !== 200) {
+      bubble('notice', response.status === 204 ? `Queue done: ${done} case${done === 1 ? '' : 's'}.` : `Queue stopped: ${response.status} ${await response.text()}`);
+      return;
+    }
+    const item = await response.json();
+    const before = state.workspace;
+    await connect();
+    if (state.workspace === before) {
+      bubble('notice', 'Queue stopped: the endpoint could not be read.');
+      return;
+    }
+    $('#transcript').replaceChildren();
+    if (item.turns) {
+      $('#b-turns').value = String(item.turns);
+    }
+    for (const text of item.messages ?? []) {
+      const message = await send({ text, case: { id: item.case, run: item.run ?? 1 } });
+      if (!message || message.outcome === 'stopped') {
+        bubble('notice', 'Queue stopped.');
+        return;
+      }
+      if (message.outcome === 'error' && !message.calls.some(c => !c.error)) {
+        bubble('notice', `Queue stopped: the model never answered (${message.error}).`);
+        return;
+      }
+    }
   }
 }
 
@@ -688,10 +785,12 @@ function init() {
   $('#run').addEventListener('click', () => runOperation($('#op').value, readForm()));
   $('#stop').addEventListener('click', () => state.running?.abort());
   $('#connect').addEventListener('click', connect);
-  $('#send').addEventListener('click', send);
+  $('#send').addEventListener('click', () => send());
   $('#chat-stop').addEventListener('click', () => state.chatAbort?.abort());
+  $('#chat-export').addEventListener('click', downloadTranscript);
   $('#chat-clear').addEventListener('click', () => {
     state.chat = null;
+    state.transcript = null;
     $('#transcript').replaceChildren();
   });
   $('#prompt').addEventListener('keydown', event => {
@@ -701,7 +800,25 @@ function init() {
     }
   });
   renderOperation();
-  connect();
+  const connected = connect();
+  findRecorder().then(async found => {
+    if (!found) {
+      return;
+    }
+    let told = false;
+    state.recorder = new Recorder(error => {
+      if (!told) {
+        told = true;
+        bubble('notice', `Could not write the transcript to ${found.dir}/: ${error.message ?? error}`);
+      }
+    });
+    $('#record-note').hidden = false;
+    $('#record-note').textContent = `Each conversation is written to ${found.dir}/ as it goes (serve.py).`;
+    if (new URLSearchParams(location.search).has('queue')) {
+      await connected;
+      await runQueue();
+    }
+  });
 }
 
 // For inspection from the console; the page does not depend on it.

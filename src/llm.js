@@ -35,6 +35,11 @@ function closingNotice(turns) {
 // Models that take Anthropic's server-side refusal fallback (`fallbacks: "default"`).
 const FALLBACK_MODELS = new Set([ 'claude-opus-5', 'claude-fable-5-1' ]);
 
+// Models whose thinking comes back as empty text unless asked for (`display` defaults to
+// "omitted"). Summarized, it is billed the same, and a transcript can show why each call was
+// made (D18). Not on a turn that forces a tool, which may not take thinking.
+const SUMMARIZED_THINKING = new Set([ 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1' ]);
+
 /**
  * List prices in US dollars per million tokens, from Anthropic's pricing page on 2026-11-05:
  * base input, 5-minute cache write, cache read, output. Haiku 5.5 alone has a second list for a
@@ -104,6 +109,8 @@ export function createChat({ provider, apiKey, model, baseURL }) {
  *   onNotice(text)           — something the person should see that is not the model's text
  *   onUsage(call)            — one model call's tokens (model, input, cacheWrite, cacheRead,
  *                              output) and cost, null where no price is listed
+ *   onCall(record)           — one model call for the transcript (D18): turn, ms, model, stop
+ *                              reason, tool_choice, usage; what a refusal cut off; or the error
  *   maxTurns                — model calls this message may make, the last with tools off
  *   toolFirst                — the message's first turn must call a tool (guided mode, D16)
  *   signal                   — aborts the whole exchange
@@ -135,17 +142,21 @@ class AnthropicChat {
         cache_control: { type: 'ephemeral' },
         ...(choice ? { tool_choice: choice } : {}),
         ...(h.effort ? { output_config: { effort: h.effort } } : {}),
+        ...(SUMMARIZED_THINKING.has(this.model) && !h.toolFirst ? { thinking: { type: 'adaptive', display: 'summarized' } } : {}),
       };
       const stream = FALLBACK_MODELS.has(this.model) ?
         this.client.beta.messages.stream({ ...params, betas: [ 'server-side-fallback-2026-07-01' ], fallbacks: 'default' }, { signal: h.signal }) :
         this.client.messages.stream(params, { signal: h.signal });
       h.onTurnStart();
       stream.on('text', delta => h.onText(delta));
+      const started = Date.now();
+      const call = { turn, tool_choice: choice?.type ?? 'auto' };
       let message;
       try {
         message = await stream.finalMessage();
         jsonRetries = 0;
       } catch (error) {
+        h.onCall?.({ ...call, ms: Date.now() - started, ...failure(error) });
         // Only a tool input the SDK could not parse is re-issued; everything else is thrown.
         const unparsed = !(error instanceof Anthropic.APIError) && /^Unable to parse tool parameter JSON/u.test(error?.message ?? '');
         if (!unparsed || h.signal?.aborted || jsonRetries++ >= 2) {
@@ -154,7 +165,13 @@ class AnthropicChat {
         h.onNotice('A tool call arrived malformed; asking again.');
         continue;
       }
-      h.onUsage?.(meterAnthropic(message));
+      const usage = meterAnthropic(message);
+      h.onUsage?.(usage);
+      h.onCall?.({
+        ...call, ms: Date.now() - started, model: message.model, stop: message.stop_reason, usage,
+        // A refusal's turn is kept out of the conversation; the transcript keeps what it said.
+        ...(message.stop_reason === 'refusal' ? { stop_details: message.stop_details ?? null, dropped: message.content } : {}),
+      });
       if (message.stop_reason === 'refusal') {
         // A refusal can cut a tool call off mid-input: run nothing from this turn, keep nothing of it.
         h.onNotice('The model declined this request.');
@@ -218,14 +235,25 @@ class OpenAIChat {
       }
       h.onTurnStart();
       const choice = closing ? 'none' : h.toolFirst && turn === 0 ? 'required' : null;
-      const response = await this.client.chat.completions.create(
-        { model: this.model, messages: this.messages, tools, ...(choice ? { tool_choice: choice } : {}) },
-        { signal: h.signal },
-      );
+      const started = Date.now();
+      let response;
+      try {
+        response = await this.client.chat.completions.create(
+          { model: this.model, messages: this.messages, tools, ...(choice ? { tool_choice: choice } : {}) },
+          { signal: h.signal },
+        );
+      } catch (error) {
+        h.onCall?.({ turn, tool_choice: choice ?? 'auto', ms: Date.now() - started, ...failure(error) });
+        throw error;
+      }
       const call = meterOpenAI(response, this.model);
       if (call) {
         h.onUsage?.(call);
       }
+      h.onCall?.({
+        turn, tool_choice: choice ?? 'auto', ms: Date.now() - started, model: response.model || this.model,
+        stop: response.choices[0]?.finish_reason ?? null, usage: call,
+      });
       const message = response.choices[0].message;
       if (message.content) {
         h.onText(message.content);
@@ -253,6 +281,30 @@ class OpenAIChat {
       this.messages.push(...results);
     }
   }
+}
+
+/**
+ * A failed call as the transcript keeps it (D14, D18): the message, the HTTP status, and the
+ * headers that carry a reason or a wait. A gateway's 403 can have no body and say why only in
+ * a header.
+ */
+export function failure(error) {
+  const out = { error: error?.message ?? String(error) };
+  if (typeof error?.status === 'number') {
+    out.status = error.status;
+  }
+  const h = error?.headers;
+  const headers = {};
+  for (const name of [ 'www-authenticate', 'x-ext-auth-reason', 'retry-after', 'x-ratelimit-remaining', 'request-id', 'x-request-id' ]) {
+    const value = typeof h?.get === 'function' ? h.get(name) : h?.[name];
+    if (value) {
+      headers[name] = value;
+    }
+  }
+  if (Object.keys(headers).length) {
+    out.headers = headers;
+  }
+  return out;
 }
 
 async function runTool(h, name, input) {
