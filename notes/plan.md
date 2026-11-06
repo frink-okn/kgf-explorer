@@ -153,6 +153,18 @@ instructions. Content safety is the provider's: the visitor chose the model and 
 page can set, and it asks for more tool calls, not fewer. Added 2026-09-26: gpt-5.6-sol,
 asked for an omelet recipe, called `list_graphs` and then wrote the recipe, citing no table.
 
+*2026-11-06:* Qwen 3.8 27B on RENCI's MaaS (§3 item 4), asked for a ham-and-pineapple omelet
+with "Don't worry about finding it in the graphs; I'm happy to have one you make up," wrote
+the recipe in its one model call (5,216 prompt tokens, 1,039 out), with no tool call, under
+"this is made up, not from the graphs." Full mode, since guided mode's first turn must call a
+tool. §2's omelet question did not waive the rule; this one does, and the model took the
+person's word over the system prompt's. The label meets the attribution D15 is for, but the
+rule says not to answer from the model's own knowledge, and a hosted default (§3 item 4) would
+pay for such replies. Both prompts now say the rule holds when the person asks for something
+made up. Asked again after the change, Qwen kept to it; one run, and no other model checked. The gate's after-a-tool-call check
+would have refused this reply. It would not refuse gpt-5.6-sol's, written after one
+`list_graphs`.
+
 **D16. Guided mode, for weaker models and first looks** (proposed and prototyped
 2026-09-28). A second list of operations (`src/guided.js`) beside D1's, with the same two
 surfaces: `graphs`, `find`, `classes`, `members`, `links`, `follow`, `common`. They take
