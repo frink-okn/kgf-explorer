@@ -107,6 +107,11 @@
   .msg.tool code { word-break: break-all; }
   .msg.tool a { color: var(--accent); }
   .msg.notice { font-size: 12px; color: var(--warn); }
+  .msg.meter { font-size: 11.5px; color: var(--muted); padding: 2px 9px; white-space: normal; font-variant-numeric: tabular-nums; }
+  .msg.meter details { margin: 2px 0 0; }
+  .msg.meter table { width: auto; font-size: 11.5px; }
+  .msg.meter th, .msg.meter td { padding: 1px 6px; text-align: right; border-bottom: 1px solid var(--line); }
+  .msg.meter th { position: static; background: none; font-weight: 600; }
   #prompt { resize: vertical; min-height: 60px; }
   #op-form textarea { font: 12px/1.4 var(--mono); resize: vertical; }
   @media (max-width: 1100px) {

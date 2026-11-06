@@ -466,9 +466,66 @@ function ensureChat() {
   }
   if (!state.chat) {
     state.chat = createChat(settings);
+    state.chat.usage = [];
     state.chatSignature = signature;
   }
   return state.chat;
+}
+
+const int = n => n.toLocaleString('en-US');
+const dollars = n => `$${n.toFixed(n >= 1 ? 2 : n >= 0.01 ? 3 : 4)}`;
+
+function meterTotals(calls) {
+  const t = { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, cost: 0, priced: true, long: 0 };
+  for (const c of calls) {
+    t.input += c.input;
+    t.cacheWrite += c.cacheWrite;
+    t.cacheRead += c.cacheRead;
+    t.output += c.output;
+    t.long += c.long ? 1 : 0;
+    if (c.cost === null) {
+      t.priced = false;
+    } else {
+      t.cost += c.cost;
+    }
+  }
+  t.prompt = t.input + t.cacheWrite + t.cacheRead;
+  return t;
+}
+
+/**
+ * The tokens one message's model calls used, as the provider reported them, and their cost at
+ * list price; with the conversation's total once there is more than one message (§3 item 4).
+ */
+function meterView(calls, conversation) {
+  const t = meterTotals(calls);
+  const parts = [
+    `${[ ...new Set(calls.map(c => c.model)) ].join(', ')} · ${calls.length} call${calls.length === 1 ? '' : 's'}`,
+    `${int(t.prompt)} prompt tokens (${int(t.cacheRead)} read from cache, ${int(t.cacheWrite)} written, ${int(t.input)} uncached)`,
+    `${int(t.output)} output`,
+  ];
+  if (t.priced) {
+    parts.push(dollars(t.cost));
+    const all = meterTotals(conversation);
+    if (conversation.length > calls.length && all.priced) {
+      parts.push(`conversation ${dollars(all.cost)}`);
+    }
+  } else {
+    parts.push('no price listed for this model');
+  }
+  if (t.long) {
+    parts.push(`${t.long} over 100,000 prompt tokens, at the higher price`);
+  }
+  const head = [ 'call', 'prompt', 'cache read', 'written', 'uncached', 'output', 'cost' ];
+  return [
+    el('span', {}, parts.join(' · ')),
+    el('details', {}, el('summary', {}, 'per call'),
+      el('table', {},
+        el('thead', {}, el('tr', {}, head.map(h => el('th', {}, h)))),
+        el('tbody', {}, calls.map((c, i) => el('tr', {},
+          [ i + 1, c.input + c.cacheWrite + c.cacheRead, c.cacheRead, c.cacheWrite, c.input, c.output ].map(n => el('td', {}, int(n))),
+          el('td', {}, c.cost === null ? '—' : `${dollars(c.cost)}${c.long ? ' *' : ''}`)))))),
+  ];
 }
 
 function bubble(kind, ...children) {
@@ -524,6 +581,8 @@ async function send() {
   state.chatAbort = abort;
   $('#send').disabled = true;
   $('#chat-stop').disabled = false;
+  const chat = state.chat;
+  const calls = [];
   let current = null;
   const tools = guided() ? guidedToolsFor(state.endpoint) : TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   try {
@@ -545,6 +604,10 @@ async function send() {
         queueRender(current);
       },
       onNotice: note => bubble('notice', note),
+      onUsage: call => {
+        calls.push(call);
+        chat.usage.push(call);
+      },
       execute: async(name, input) => {
         const chip = bubble('tool', el('b', {}, name), ' ', el('code', {}, JSON.stringify(input)), ' …');
         current = null;
@@ -569,6 +632,10 @@ async function send() {
   } catch (error) {
     bubble('notice', abort.signal.aborted ? 'Stopped.' : `Error: ${error.message ?? error}`);
   } finally {
+    // A stopped or failed message still shows what its finished calls used.
+    if (calls.length > 0) {
+      bubble('meter', ...meterView(calls, chat.usage));
+    }
     state.chatAbort = null;
     $('#send').disabled = false;
     $('#chat-stop').disabled = true;

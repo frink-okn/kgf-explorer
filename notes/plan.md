@@ -114,6 +114,21 @@ servers disagree on its values. Checked: the request bodies with fetch stubbed (
 the fallback path for `claude-opus-5`), and the field in a browser, hidden for the other
 providers and remembered per provider. Not checked against the API.
 
+*2026-11-05:* a meter, and prompt caching on the Anthropic adapter. Each model call reports its
+usage (uncached input, cache writes, cache reads, output); under each message the chat shows the
+calls' totals, a per-call table, and the cost at list price for the four Anthropic models in
+`PRICES` (`src/llm.js`, from the pricing page that day, Haiku 5.5's 100k-token second list
+included), with the conversation's total. Other models are metered in tokens only, where the
+server reports usage. Requests now carry a top-level `cache_control`, so each call reads the
+previous one's prefix from the cache (§3 item 4 assumed this; the page did not do it). Checked:
+`priceCall` against seven hand-worked cases, and the meter in a browser against
+`test/fake_llm.py`, which now reports made-up usage (3 calls, 8,200 prompt tokens, sums
+right). Not checked against the API: whether cache reads appear, and a real question's cost.
+*Later that day:* checked against the API with `claude-haiku-5-5` (§3 item 4). Every call
+after the first read the previous call's prompt from the cache, less 2 to 4 tokens; the first
+call's 7,123 tokens match `count_tokens`; the meter's $0.014 matches the four counts at list
+price by hand.
+
 **D13. Model output is rendered, sanitized.** Replies render as light Markdown through
 markdown-it with raw HTML off, then DOMPurify: a reply can quote graph content, and the page
 holds a key. Links open in a new tab; table ids a reply cites link to their tables.
@@ -518,6 +533,57 @@ model does not need. Checked in a browser against the live endpoint; not with a 
      comparison, not only flight against ground; Opus 5.5 on the same page filtered them but
      found 4 of 28. A tier to try: Haiku 5.5 for anonymous visitors, Opus 5.5 after sign-in, and
      a button that moves a conversation up, since Opus 5.5 reads Haiku 5.5's thinking blocks.
+
+   *2026-11-05, the fixed part counted:* `count_tokens` on full mode's system prompt and 16
+   tools, for `claude-haiku-5-5` and `claude-opus-5-5`: 7,096 tokens on every call (system
+   prompt 992; tools 6,104, which includes the API's own tool-use instructions), against the
+   4.5k assumed above. The two models count it the same. Prose runs 3.19 characters a token,
+   the tools' JSON 2.50; four a token undercounts both. Cached, the 7.1k costs Haiku 5.5 about
+   $0.0015 on a 10-call question, against $0.0010 at 4.5k. Tool results, thinking and answers
+   are the rest of a question and are not counted yet; the D12 meter is for that. Haiku 5.5
+   is the target for the hosted default.
+
+   *2026-11-05, one question metered* (D12's meter; Haiku 5.5, full mode, default effort): §2's
+   climate-model question, answered right, in 15 calls. The prompt grew from 7,123 tokens to
+   51,256, about 3,150 a call; 495,748 prompt tokens in all, 444,462 cache reads, 51,254 cache
+   writes, 32 uncached. Output 6,447, 430 a call against the 650 assumed above, 1,473 on the
+   last. $0.0141 at list price: cache writes 46%, reads 32%, output 23%. That sits between the
+   typical estimate ($0.008, 10 calls to 25k) and the heavy one ($0.021, 25 calls to 50k). At
+   this cost: $42 a month at 100 a day, $422 at 1,000, and Start's $500 cap holds about 1,200
+   a day. The same tokens at list price: Sonnet 5.5 $0.24, Opus 5.5 $0.47 (34×). One
+   question, one run.
+
+   *The same question on Opus 5.5,* also right: 13 calls, the prompt to 34,415 tokens; 311,876 prompt
+   tokens (277,435 cache reads, 34,413 writes, 28 uncached) and 3,263 output: 37% fewer prompt
+   tokens than Haiku 5.5 and half its output. $0.293: writes 59%, reads 19%, output 22%. So
+   21× Haiku 5.5 on the same question, not the 34× of the prices alone. At this cost, $879 a
+   month at 100 a day; Build's $1,000 cap holds about 110 a day.
+
+   *A larger question on Haiku 5.5:* "Which North Carolina manufacturers are also
+   FDA-registered device makers?" (sudokn, the Medical Device KG). 20 calls; the prompt to
+   80,293 tokens, 21k of it from one tool result (call 5); 1,087,405 prompt tokens (1,007,072
+   cache reads, 80,291 writes, 42 uncached) and 8,185 output. $0.0242: writes 41%, reads 42%,
+   output 17%. Every call rereads the prompt, so reads overtake writes as a question runs
+   long. The last prompt is 80% of Haiku's 100k price step, past which each call bills at five
+   times, cache reads included: the gate's context cap and a cap on one tool result's size
+   both matter. The answer: 14 manufacturers, joined on name and ZIP after `overlap` found no
+   shared IRIs, 4 exact matches and 10 prefix matches it called judgment calls. Read as good;
+   not checked against the graphs.
+
+   *Checked the same day through OKN-MCP's SPARQL:*
+   - medical-device-kg holds 313 NC registration records (`md:RegistrationListingRecord` with
+     `md:state` "NC"), 278 of them geocoded (`md:Facility`); Haiku read only the 278. SUDOKN
+     holds 1,305 NC manufacturers at 1,640 locations. Same-ZIP pairs: 1,939, in 131 ZIPs.
+   - Over those pairs, names normalized for case, punctuation and legal suffixes: 10 equal, 5
+     where one is a prefix of the other, 2 that share only a first word. All 14 of Haiku's are
+     among them; six of its prefix matches are equal once "LLC" and the like are dropped.
+   - Missed: Beocare (28638) and Thunderbird Molding (27407), prefix matches whose
+     registrations have no geocode; and Hanes Companies against Hanes Industries (28613), first
+     word only. So 16 clear matches, 17 with Hanes.
+   - All 17 registrations carry status 1 and expiry year 2026. Equal names at another NC ZIP
+     are only second sites of two firms already matched (Elastic Therapy, Precision Fabrics).
+   - OKN-MCP's join table holds this pair as a name join confirmed by ZIP (I3); the page has
+     no join table, and Haiku reached the same method on its own.
 5. **Claude and ChatGPT as hosts.** Published as a claude.ai artifact, the page could call
    Claude on the viewer's plan through the `sample` capability (unchecked: free plans, and
    whether the sandbox reaches the KGF endpoint). An MCP App would put the operations inside

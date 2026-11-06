@@ -35,6 +35,53 @@ function closingNotice(turns) {
 // Models that take Anthropic's server-side refusal fallback (`fallbacks: "default"`).
 const FALLBACK_MODELS = new Set([ 'claude-opus-5', 'claude-fable-5-1' ]);
 
+/**
+ * List prices in US dollars per million tokens, from Anthropic's pricing page on 2026-11-05:
+ * base input, 5-minute cache write, cache read, output. Haiku 5.5 alone has a second list for a
+ * request whose prompt (uncached input, cache writes and cache reads together) is over 100,000
+ * tokens. A model not listed is metered in tokens only.
+ */
+export const PRICES = {
+  'claude-haiku-5-5': { input: 0.10, write: 0.125, read: 0.01, output: 0.50, long: { over: 100_000, input: 0.50, write: 0.625, read: 0.05, output: 2.50 } },
+  'claude-sonnet-5-5': { input: 2, write: 2.50, read: 0.10, output: 10 },
+  'claude-opus-5-5': { input: 4, write: 5, read: 0.20, output: 20 },
+  'claude-opus-5': { input: 5, write: 6.25, read: 0.50, output: 25 },
+};
+
+/** A call's cost at list price, or null for a model PRICES does not list. */
+export function priceCall(call) {
+  const list = PRICES[call.model];
+  if (!list) {
+    return { cost: null, long: false };
+  }
+  const long = Boolean(list.long) && call.input + call.cacheWrite + call.cacheRead > list.long.over;
+  const r = long ? list.long : list;
+  return { cost: (call.input * r.input + call.cacheWrite * r.write + call.cacheRead * r.read + call.output * r.output) / 1e6, long };
+}
+
+/** One model call's tokens as Anthropic reported them; `input` is the uncached part. */
+function meterAnthropic(message) {
+  const u = message.usage ?? {};
+  const call = {
+    model: message.model, input: u.input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0, output: u.output_tokens ?? 0,
+  };
+  return { ...call, ...priceCall(call) };
+}
+
+/** The same record from a chat-completions response, where the server reports usage at all. */
+function meterOpenAI(response, model) {
+  const u = response.usage;
+  if (!u) {
+    return null;
+  }
+  const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
+  return {
+    model: response.model || model, input: (u.prompt_tokens ?? 0) - cached, cacheWrite: 0,
+    cacheRead: cached, output: u.completion_tokens ?? 0, cost: null, long: false,
+  };
+}
+
 export function createChat({ provider, apiKey, model, baseURL }) {
   if (provider === 'anthropic') {
     if (!apiKey) {
@@ -55,7 +102,9 @@ export function createChat({ provider, apiKey, model, baseURL }) {
  *   onText(delta)            — streamed assistant text
  *   onTurnStart()            — a new model turn began
  *   onNotice(text)           — something the person should see that is not the model's text
- *   maxTurns                 — model calls this message may make, the last with tools off
+ *   onUsage(call)            — one model call's tokens (model, input, cacheWrite, cacheRead,
+ *                              output) and cost, null where no price is listed
+ *   maxTurns                — model calls this message may make, the last with tools off
  *   toolFirst                — the message's first turn must call a tool (guided mode, D16)
  *   signal                   — aborts the whole exchange
  */
@@ -79,8 +128,11 @@ class AnthropicChat {
         h.onNotice(closingNotice(maxTurns));
       }
       const choice = closing ? { type: 'none' } : h.toolFirst && turn === 0 ? { type: 'any' } : null;
+      // cache_control caches the conversation so far at each call, and the next call reads it
+      // back: a full-mode question is 10–33 calls over one growing prefix (§3 item 4).
       const params = {
         model: this.model, max_tokens: 64000, system: h.system, tools, messages: this.messages,
+        cache_control: { type: 'ephemeral' },
         ...(choice ? { tool_choice: choice } : {}),
         ...(h.effort ? { output_config: { effort: h.effort } } : {}),
       };
@@ -102,6 +154,7 @@ class AnthropicChat {
         h.onNotice('A tool call arrived malformed; asking again.');
         continue;
       }
+      h.onUsage?.(meterAnthropic(message));
       if (message.stop_reason === 'refusal') {
         // A refusal can cut a tool call off mid-input: run nothing from this turn, keep nothing of it.
         h.onNotice('The model declined this request.');
@@ -169,6 +222,10 @@ class OpenAIChat {
         { model: this.model, messages: this.messages, tools, ...(choice ? { tool_choice: choice } : {}) },
         { signal: h.signal },
       );
+      const call = meterOpenAI(response, this.model);
+      if (call) {
+        h.onUsage?.(call);
+      }
       const message = response.choices[0].message;
       if (message.content) {
         h.onText(message.content);

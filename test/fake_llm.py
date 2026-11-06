@@ -70,9 +70,14 @@ class Fake(BaseHTTPRequestHandler):
             message = {"role": "assistant", "content": None, "tool_calls": [{
                 "id": f"call_{n}", "type": "function",
                 "function": {"name": "list_graphs", "arguments": "{}"}}]}
+        # Usage that grows with the conversation, for the page's meter; the numbers are made up.
+        prompt = 1000 + 400 * len(body["messages"])
+        usage = {"prompt_tokens": prompt, "completion_tokens": 60 if closing else 25,
+                 "prompt_tokens_details": {"cached_tokens": prompt - 400 if n > 1 else 0}}
         self.reply({"id": f"fake-{n}", "object": "chat.completion", "created": 0, "model": body["model"],
                     "choices": [{"index": 0, "message": message,
-                                 "finish_reason": "stop" if closing else "tool_calls"}]})
+                                 "finish_reason": "stop" if closing else "tool_calls"}],
+                    "usage": usage})
 
     def log_message(self, *args) -> None:
         pass
