@@ -202,7 +202,8 @@ export function summarizeForModel(result) {
     out.columns = table.variables;
     // A schema listing is shown whole: its point is the small entries a size ranking hides.
     // So is the graph list: a preview of it hid spoke-okn, the 41st of 45.
-    const shown = table.operation === 'schema' || table.operation === 'list_graphs' ? SCHEMA_ROWS : PREVIEW_ROWS;
+    // So are where and connections (D19): an identifier or a predicate past row 20 is the one missed.
+    const shown = [ 'schema', 'list_graphs', 'where', 'connections' ].includes(table.operation) ? SCHEMA_ROWS : PREVIEW_ROWS;
     out.preview = table.rows.slice(0, shown).map(compactRow);
     const labels = labelsFor(table, table.rows.slice(0, shown));
     if (Object.keys(labels).length) {

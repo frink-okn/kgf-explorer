@@ -52,6 +52,7 @@ gate up for the page, and its `dev/build-key` is the key that gate trusts.
 | `src/llm.js` | the chat loop: Anthropic's SDK, the OpenAI chat-completions shape, and the FRINK gate |
 | `src/prompt.js` | the full-mode prompt and the last-turn note, which the page sends and the build signs |
 | `src/map.js` | map mode (plan D19): the `map` tool and its prompt; the page checks a map and runs its paths |
+| `src/links.js` | an entity everywhere: presence, Babel's equivalents, its predicates per graph; for `where`, `connections` and maps |
 | `gate-manifest.js` | writes and signs the gate's manifest from `src/prompt.js` and `src/tools.js`, at build time |
 | `src/sha256.js`, `src/pow-worker.js` | the gate's proof of work, in a worker |
 | `src/transcript.js` | a conversation kept as evidence: prompt, tools, every model call, what each result showed the model, receipts |

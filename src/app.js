@@ -5,11 +5,12 @@
 import { GUIDED_BY_NAME, GUIDED_SYSTEM, GUIDED_TOOLS, guidedToolsFor } from './guided.js';
 import { Endpoint } from './kgf.js';
 import { DEFAULT_TURNS, ENDS, PROVIDERS, createChat, failure } from './llm.js';
-import { MAP_ROWS, MAP_SYSTEM, mapClosingNotice, mapLastTurnNote, mapTools, runMap } from './map.js';
+import { RDF_OBJECT, RDF_SUBJECT } from './links.js';
+import { MAP_ROWS, MAP_SYSTEM, isStatementHop, mainClass, mapClosingNotice, mapLastTurnNote, mapTools, runMap } from './map.js';
 import { SYSTEM } from './prompt.js';
 import { linkTables, renderMarkdown } from './markdown.js';
 import { Sql } from './sql.js';
-import { TOOLS, TOOL_BY_NAME } from './tools.js';
+import { FULL_TOOLS, TOOLS, TOOL_BY_NAME } from './tools.js';
 import { Recorder, Transcript, findRecorder } from './transcript.js';
 import { Workspace, summarizeForModel } from './workspace.js';
 
@@ -622,85 +623,235 @@ function graphCounts(counts, shown = 6) {
 /**
  * A map as the page writes it (D19). Every line comes from a table the page ran for the map, a
  * table the model listed as checked (described by its receipt), or a graph's label; the model's
- * own text is never here.
+ * own text is never here. Where the start is, then one line per path from it to what it
+ * reaches, then what the page noticed; every step, with its tables, is folded below.
  */
 function mapCard(view) {
-  // A graph's label, else the IRI's last segment (shown as such, not bold), beside the IRI.
-  const named = (iri, label) => {
-    const short = shortIri(iri);
-    if (label) {
-      return [ el('b', {}, label), ' ', el('code', {}, short) ];
-    }
-    const local = /[#/]([^#/]+)$/u.exec(iri)?.[1];
-    return short === iri && local ? [ local, ' ', el('code', {}, iri) ] : [ el('code', {}, short) ];
-  };
-  const shownValue = ({ term, label }) => (term.type === 'iri' ? label ?? shortIri(term.value) : `“${term.value}”`);
   const sub = (...children) => el('div', { class: 'map-sub' }, ...children);
   const warn = (...children) => el('div', { class: 'map-sub warn' }, ...children);
   const cap = Math.min(budget().maxRows || MAP_ROWS, MAP_ROWS);
   const stopped = b => (b === 'max_rows' ? `stopped at ${int(cap)} rows, the map's budget` : `stopped at ${b}`);
+  const local = iri => iri.replace(/^.*[#/]/u, '') || iri;
+  const nameOf = (iri, label) => label ?? local(iri);
+  const chip = (text, kind, title) => el('span', { class: `map-chip ${kind}`, title }, text);
   const out = [ el('div', { class: 'map-head' }, view.outcome === 'found' ? 'Where the graphs hold this' : 'The graphs do not hold this') ];
-  if (view.outcome === 'not_covered' && view.paths.length) {
-    out.push(el('div', { class: 'map-sub' }, 'The nearest things they do hold:'));
+
+  // Where the start is, in every graph, under every identifier (the where tables).
+  const cov = view.coverage;
+  const unread = cov.graphs.filter(g => !g.followed);
+  if (cov.graphs.length) {
+    const kinds = [ cov.babel ? `${int(cov.babel)} that Babel lists as the same thing` : null, cov.sameLabel ? `${int(cov.sameLabel)} with the same label` : null ].filter(Boolean);
+    out.push(el('div', { class: 'map-sec' },
+      `Where ${cov.label ? `“${cov.label}”` : 'it'} is: in ${cov.graphs.length} graph${cov.graphs.length === 1 ? '' : 's'}, under ${int(cov.identifiers)} identifier${cov.identifiers === 1 ? '' : 's'}${kinds.length ? ` (${kinds.join(', ')})` : ''} `,
+      ...cov.tables.flatMap(id => [ tableLink(id), ' ' ])));
+    const chipOf = g => {
+      const iris = [ ...g.iris ];
+      const short = iris.length === 1 && shortIri(iris[0][0]).length <= 24 ? shortIri(iris[0][0]) : `${iris.length} identifier${iris.length === 1 ? '' : 's'}`;
+      const title = iris.map(([ i, x ]) => `${shortIri(i)}${x.label ? ` “${x.label}”` : ''} (${x.how})`).join('\n');
+      return chip(`${g.graph} · ${short} · ${int(g.triples)}`, g.followed ? 'start' : 'off', title);
+    };
+    const shown = [ ...cov.graphs.filter(g => g.followed), ...unread.slice(0, COVERAGE_UNREAD) ];
+    const rest = unread.slice(COVERAGE_UNREAD);
+    out.push(el('div', { class: 'map-chips' }, shown.map(chipOf), ' ',
+      rest.length ? chip(`${rest.length} more`, 'off', rest.map(g => `${g.graph} · ${int(g.triples)}`).join('\n')) : null));
   }
-  for (const path of view.paths) {
-    const s = path.start;
-    const list = el('ol', { class: 'map-path' });
-    if (s.kind === 'iri') {
-      list.append(el('li', {}, ...named(s.iri, s.label), ` in ${s.graph}`,
-        sub([ s.subject.size ? `Subject in ${graphCounts(s.subject)}` : null, s.object.size ? `object in ${graphCounts(s.object)}` : null ].filter(Boolean).join('; '),
-          ' (triples) ', tableLink(s.tables[0]), ' ', tableLink(s.tables[1]))));
-    } else if (s.kind === 'class') {
-      list.append(el('li', {}, 'Members of ', ...named(s.iri, s.label), ` in ${s.graph}: ${int(s.count)}`, ' ', tableLink(s.tables[0]),
-        s.members.examples.length ? el('div', { class: 'map-ex' }, `e.g. ${s.members.examples.map(shownValue).join(', ')}${s.members.values > s.members.examples.length ? ', …' : ''}`) : null,
-        s.members.contract === 'complete' ? null :
-          warn(`The path follows the first ${int(s.members.values)}: ${s.members.error ?? stopped(s.members.budget)}. `, tableLink(s.members.table))));
-    } else {
-      list.append(el('li', {}, 'The value ', el('code', {}, s.text), ` in ${s.graph}: the object of ${int(s.count)} triples `, tableLink(s.tables[0])));
+
+  // One line per path: start, links and what each reaches, reified statements as one link.
+  if (view.groups.length) {
+    out.push(el('div', { class: 'map-sec' }, view.outcome === 'found' ? 'How they connect' : 'The nearest things they do hold'));
+    const rows = el('div', { class: 'map-rows' });
+    for (const group of view.groups) {
+      const s = group.starts[0];
+      const startText = s.kind === 'iri' ? [ ...new Set(group.starts.map(x => x.label ?? shortIri(x.iri))) ].join(', ') :
+        s.kind === 'class' ? `${int(s.count)} ${nameOf(s.iri, s.label)}` : s.text;
+      const chain = [ chip(startText, 'start', group.starts.map(x => x.iri ?? x.text).join('\n')), ' ' ];
+      const lines = [];
+      let graph = group.graph;
+      let prev = null;
+      let last = null;
+      for (let k = 0; k < group.steps.length; k++) {
+        const st = group.steps[k];
+        const into = st.graph === graph ? '' : ` into ${st.graph}`;
+        graph = st.graph;
+        if (st.skipped) {
+          chain.push(el('span', { class: 'map-link' }, `${st.direction === 'in' ? '←' : '→'} ${nameOf(st.iri, st.label)}${into}`), chip('not run', 'off'));
+          lines.push(sub(`Not run: ${st.skipped}.`));
+          break;
+        }
+        const next = group.steps[k + 1];
+        const pair = isStatementHop(st) && next && !next.skipped && next.kind === 'predicate' && next.direction === 'out' && next.graph === st.graph &&
+          (next.iri === RDF_SUBJECT || next.iri === RDF_OBJECT) && next.iri !== st.iri;
+        if (pair) {
+          const kinds = (st.profile?.ranked ?? []).slice(0, 2).map(c => nameOf(c.iri, c.label)).join(' / ') || 'reified';
+          chain.push(el('span', { class: 'map-link', title: `${shortIri(st.iri)} then ${shortIri(next.iri)}` }, `${st.direction === 'in' ? '←' : '→'} ${int(st.reached)} ${kinds} statements${into} →`));
+          k++;
+          prev = st;
+          last = next;
+        } else if (st.kind === 'class') {
+          chain.push(el('span', { class: 'map-link' }, `keep ${nameOf(st.iri, st.label)}${into}`));
+          const kept = nameOf(st.iri, st.label);
+          if (prev?.profile && prev.reached > st.reached) {
+            const others = prev.profile.ranked.filter(c => c.iri !== st.iri).slice(0, 2).map(c => `${int(c.count)} ${nameOf(c.iri, c.label)}`);
+            lines.push(sub(`${int(prev.reached - st.reached)} of ${int(prev.reached)} set aside${others.length ? `: ${others.join(', ')}` : ''}${prev.profile.none ? `${others.length ? ',' : ':'} ${int(prev.profile.none)} with no class` : ''}.`));
+          }
+          last = { ...st, display: `${int(st.reached)} ${kept}` };
+        } else {
+          chain.push(el('span', { class: 'map-link', title: shortIri(st.iri) }, `${st.direction === 'in' ? '←' : '→'} ${nameOf(st.iri, st.label)}${into}`));
+          last = st;
+        }
+        const node = last.display ?? nodeText(last, nameOf);
+        chain.push(' ', chip(node, last.kind === 'class' || mainClass(last) ? 'end' : 'mid', nodeTitle(last, nameOf)), ' ');
+        // A class step's values that are not members are set aside, above, not lost.
+        if (st.kind !== 'class' && st.sent > 1 && st.matched < st.checked) {
+          lines.push(warn(`${into ? `Into ${st.graph}: ` : ''}${int(st.matched)} of ${int(st.sent)} values matched; ${int(st.checked - st.matched)} found nothing, e.g. `, el('code', {}, st.unmatchedSample.slice(0, 2).join('  '))));
+        }
+        if (st.error) {
+          lines.push(warn(`Failed: ${st.error}`));
+        } else if (st.contract !== 'complete') {
+          lines.push(warn(`Lower bounds from here: ${stopped(st.budget)}.`));
+        }
+        if (last !== st && last.contract !== 'complete' && !last.error) {
+          lines.push(warn(`Lower bounds from here: ${stopped(last.budget)}.`));
+        }
+        prev = last;
+      }
+      if (s.members && s.members.contract !== 'complete') {
+        lines.unshift(warn(`The path follows the first ${int(s.members.values)} members: ${s.members.error ?? stopped(s.members.budget)}.`));
+      }
+      const end = last ?? null;
+      if (end?.examples?.length) {
+        lines.push(el('div', { class: 'map-ex' }, `e.g. ${end.examples.map(e => clipText(e.term.type === 'iri' ? e.label ?? shortIri(e.term.value) : `“${e.term.value}”`)).join(', ')}${end.reached > end.examples.length ? ', …' : ''} `,
+          el('a', { href: '#', class: 'tref', title: 'Every value this path reaches, with its label', onclick: event => {
+            event.preventDefault();
+            downloadEnd(end, group);
+          } }, 'CSV')));
+      } else if (!group.steps.length && s.members?.examples?.length) {
+        lines.push(el('div', { class: 'map-ex' }, `e.g. ${s.members.examples.map(e => e.label ?? shortIri(e.term.value)).join(', ')}${s.members.values > s.members.examples.length ? ', …' : ''}`));
+      }
+      const graphs = [ ...new Set([ group.graph, ...group.steps.map(x => x.graph) ]) ];
+      rows.append(el('code', { class: 'map-graph' }, graphs.join(' → ')), el('div', {}, el('div', { class: 'map-chain' }, chain), lines));
     }
-    let graph = s.graph;
-    for (const step of path.steps) {
-      const where = step.graph === graph ? ` in ${step.graph}` : el('span', { class: 'map-cross' }, ` into ${step.graph}`);
-      const li = step.kind === 'class' ?
-        el('li', {}, 'only members of ', ...named(step.iri, step.label), where) :
-        el('li', {}, step.direction === 'out' ? '→ ' : '← ', ...named(step.iri, step.label), where);
-      graph = step.graph;
-      if (step.skipped) {
-        li.append(sub(`Not run: ${step.skipped}.`));
-        list.append(li);
-        continue;
-      }
-      const parts = step.kind === 'class' ?
-        [ `${int(step.reached)} of the ${int(step.sent)} value${step.sent === 1 ? '' : 's'} before it are members` ] :
-        [ `${int(step.triples)} triple${step.triples === 1 ? '' : 's'}, reaching ${int(step.reached)} distinct value${step.reached === 1 ? '' : 's'}` ];
-      if (step.kind !== 'class' && (step.sent > 1 || step.matched < step.sent)) {
-        parts.push(`${int(step.matched)} of the ${int(step.sent)} value${step.sent === 1 ? '' : 's'} before it matched`);
-      }
-      li.append(sub(parts.join('; '), ' ', tableLink(step.table)));
-      if (step.examples.length) {
-        li.append(el('div', { class: 'map-ex' }, `e.g. ${step.examples.map(shownValue).join(', ')}${step.reached > step.examples.length ? ', …' : ''}`));
-      }
-      if (step.error) {
-        li.append(warn(`Failed: ${step.error}`));
-      } else if (step.contract !== 'complete') {
-        li.append(warn(`Counts are lower bounds: ${stopped(step.budget)}` +
-          (step.checked < step.sent ? `, with ${int(step.sent - step.checked)} of the values before it not checked` : '') + '.'));
-      } else if (step.afterPartial) {
-        li.append(warn('Counts are lower bounds: a step before it stopped at a budget.'));
-      }
-      if (step.kind !== 'class' && step.matched < step.checked && step.unmatchedSample.length) {
-        li.append(warn(`${int(step.checked - step.matched)} found nothing here, e.g. `, el('code', {}, step.unmatchedSample.slice(0, 3).join('  '))));
-      }
-      list.append(li);
-    }
-    out.push(list);
+    out.push(rows);
+  }
+
+  // What the page noticed: ends in different graphs named alike, and where the start is unread.
+  const notes = [];
+  for (const c of view.notes) {
+    notes.push(`${c.name[0].toUpperCase()}${c.name.slice(1)} in ${c.graphs[0]} (${int(c.sizes[0])}) and ${c.graphs[1]} (${int(c.sizes[1])}): ` +
+      `${c.iris ? `${int(c.iris)} IRIs` : 'no IRIs'} in common, ${int(c.names)} labels in common${c.capped ? ` (labels of the first ${int(5000)} each)` : ''}.`);
+  }
+  if (unread.length) {
+    const named = unread.slice(0, COVERAGE_UNREAD).map(g => `${g.graph} (${int(g.triples)})`).join(', ');
+    notes.push(`${cov.label ? `“${cov.label}”` : 'The start'} is also in ${named}${unread.length > COVERAGE_UNREAD ? `, and ${unread.length - COVERAGE_UNREAD} more graphs` : ''}, which this map does not follow.`);
+  }
+  if (notes.length) {
+    out.push(el('ul', { class: 'map-notes' }, notes.map(t => el('li', {}, t))));
   }
   if (view.checked.length) {
     out.push(el('div', { class: 'map-sub' }, 'What was checked:'),
       el('ul', { class: 'map-checked' }, view.checked.map(c => el('li', {}, c.text, ' ', tableLink(c.table)))));
   }
+  if (view.paths.length) {
+    out.push(el('details', { class: 'map-steps' }, el('summary', {}, 'Show every step'), stepsDetail(view, { sub, warn, stopped })));
+  }
   out.push(el('div', { class: 'map-foot' }, 'Written by the page from the tables linked here and the graphs\' labels. The model chose what to look up and which paths to show; nothing it wrote is shown.'));
   return out;
+}
+
+// Graphs that hold a map's start but that it does not follow, named before "N more".
+const COVERAGE_UNREAD = 4;
+
+/**
+ * A label cut to a line's worth from its middle: biomarkerkg's run to 80 characters, all
+ * beginning "Presence of dbSNP:" and ending in the gene, which is the part that differs.
+ */
+function clipText(text, max = 48) {
+  if (text.length <= max) {
+    return text;
+  }
+  const head = Math.floor((max - 1) * 0.4);
+  return `${text.slice(0, head)}…${text.slice(text.length - (max - 1 - head))}`;
+}
+
+/** A node's chip: "465 Gene" when one class holds nearly all of it, else its count and top classes. */
+function nodeText(step, nameOf) {
+  const top = mainClass(step);
+  if (top) {
+    return `${int(step.reached)} ${nameOf(top.iri, top.label)}`;
+  }
+  const ranked = step.profile?.ranked ?? [];
+  if (step.profile?.ofStatements) {
+    return `${int(step.reached)} statements`;
+  }
+  if (!ranked.length) {
+    return `${int(step.reached)} ${step.profile?.literals === step.reached ? 'values' : 'things'}`;
+  }
+  const parts = ranked.slice(0, 2).map(c => `${int(c.count)} ${nameOf(c.iri, c.label)}`);
+  if (ranked.length < 2 && step.profile.none) {
+    parts.push(`${int(step.profile.none)} with no class`);
+  }
+  return `${int(step.reached)}: ${parts.join(', ')}${ranked.length > 2 ? ', …' : ''}`;
+}
+
+function nodeTitle(step, nameOf) {
+  const ranked = step.profile?.ranked ?? [];
+  return [ ...ranked.slice(0, 8).map(c => `${int(c.count)} ${nameOf(c.iri, c.label)} (${shortIri(c.iri)})`),
+    step.profile?.none ? `${int(step.profile.none)} with no class` : null,
+    step.profile?.literals ? `${int(step.profile.literals)} literals` : null ].filter(Boolean).join('\n') || undefined;
+}
+
+/** Every value one end of a map reaches, with its label, as CSV. */
+function downloadEnd(step, group) {
+  const tables = (step.tables ?? [ step.table ]).map(id => state.workspace.table(id)).filter(Boolean);
+  const seen = new Map();
+  for (const t of tables) {
+    for (const row of t.rows) {
+      const term = row.to;
+      if (term && !seen.has(term.value)) {
+        seen.set(term.value, term.type === 'iri' ? t.labels?.labels.get(term.value) ?? '' : '');
+      }
+    }
+  }
+  const quote = v => `"${String(v).replaceAll('"', '""')}"`;
+  const csv = [ 'value,label', ...[ ...seen ].map(([ v, l ]) => `${quote(v)},${quote(l)}`) ].join('\n') + '\n';
+  const a = el('a', { href: URL.createObjectURL(new Blob([ csv ], { type: 'text/csv' })), download: `map-${group.graph}-${tables.map(t => t.id).join('-')}.csv` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+/** Every path step by step, with its tables: what the card's lines were counted from. */
+function stepsDetail(view, { sub, warn, stopped }) {
+  const named = (iri, label) => (label ? [ el('b', {}, label), ' ', el('code', {}, shortIri(iri)) ] : [ el('code', {}, shortIri(iri)) ]);
+  const box = el('div', {});
+  for (const path of view.paths) {
+    const s = path.start;
+    const list = el('ol', { class: 'map-path' });
+    if (s.kind === 'iri') {
+      list.append(el('li', {}, ...named(s.iri, s.label), ` in ${s.graph}: ${int(s.graphs.get(s.graph) ?? 0)} triples `, tableLink(s.where)));
+    } else if (s.kind === 'class') {
+      list.append(el('li', {}, 'Members of ', ...named(s.iri, s.label), ` in ${s.graph}: ${int(s.count)} `, tableLink(s.tables[0]), ' ', tableLink(s.members.table)));
+    } else {
+      list.append(el('li', {}, 'The value ', el('code', {}, s.text), ` in ${s.graph}: the object of ${int(s.count)} triples `, tableLink(s.tables[0])));
+    }
+    for (const step of path.steps) {
+      const li = el('li', {}, step.kind === 'class' ? 'only members of ' : step.direction === 'out' ? '→ ' : '← ', ...named(step.iri, step.label), ` in ${step.graph}`);
+      if (step.skipped) {
+        li.append(sub(`Not run: ${step.skipped}.`));
+      } else {
+        li.append(sub(`${int(step.triples)} triples, ${int(step.reached)} distinct values; ${int(step.matched)} of ${int(step.sent)} values before it matched `,
+          tableLink(step.table), step.profile?.table ? [ ' ', tableLink(step.profile.table) ] : null));
+        if (step.error) {
+          li.append(warn(`Failed: ${step.error}`));
+        } else if (step.contract !== 'complete') {
+          li.append(warn(`Lower bounds: ${stopped(step.budget)}.`));
+        }
+      }
+      list.append(li);
+    }
+    box.append(list);
+  }
+  return box;
 }
 
 /** A reply is kept as its Markdown source and re-rendered as it streams, at most every 50 ms. */
@@ -761,7 +912,7 @@ async function send({ text = $('#prompt').value, case: label = null } = {}) {
   const calls = [];
   let current = null;
   let failed = null;
-  const tools = guided() ? guidedToolsFor(state.endpoint) : mapMode() ? mapTools() : TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
+  const tools = guided() ? guidedToolsFor(state.endpoint) : mapMode() ? mapTools() : FULL_TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   const system = (guided() ? GUIDED_SYSTEM : mapMode() ? MAP_SYSTEM : SYSTEM)(state.endpoint.origin);
   const offered = new Set(tools.map(t => t.name));
   // Map mode (D19): the page shows only what it writes; a model's text goes to the transcript.

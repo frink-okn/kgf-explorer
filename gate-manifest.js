@@ -12,7 +12,7 @@ import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto
 import { readFileSync, writeFileSync } from 'node:fs';
 
 import { SYSTEM, lastTurnNote } from './src/prompt.js';
-import { TOOLS } from './src/tools.js';
+import { FULL_TOOLS } from './src/tools.js';
 
 /**
  * What the page asks of the model; the gate grants up to its own limits. The first turn is not
@@ -61,7 +61,7 @@ function main(outPath) {
     system: segments(system),
     closing: [ { text: lastTurnNote() } ],
     params: [ { name: 'endpoint', kind: 'https_url' } ],
-    tools: TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema })),
+    tools: FULL_TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema })),
     ask: ASK,
   };
   const body = JSON.stringify(manifest);

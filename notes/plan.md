@@ -482,6 +482,47 @@ maps (a question that starts `map:`); no model:
   map mode (`?queue`) is the next run: a case passes when its map holds the graphs, IRIs and
   link the case needs, and a guard when it ends in `not_covered`.
 
+*Later that day, the first model run.* Haiku 5.5, at its default effort, asked "Which genes are
+associated with asthma?": 14 calls, 445,049 prompt tokens, $0.013. It searched spoke-okn,
+biomarkerkg, rdkg, prokn and digcfdekg, and mapped only digcfdekg's two trait nodes ("Asthma",
+"asthma") through reified statements to 1,222 and 762 genes. The card was hard to read: four
+steps a path, two of them `rdf:object` and `rdf:subject`, statement IRIs as examples, one path
+drawn twice. The graphs hold more. spoke-okn links DOID:2841 to 465 genes by `ASSOCIATES_DaG`;
+Haiku read only `incoming`, whose 50 rows were the 27,747 `rdf:subject` statements of asthma's
+prevalence, and the gene link runs out. rdkg links MONDO:0004979 from 87 genes by `related_to`,
+biomarkerkg from 627 risk biomarkers. Changes:
+- Two operations for map mode only (`mapOnly`; full mode's tools, and so the gate's manifest,
+  are `FULL_TOOLS`, unchanged). `where` (navigator N5, N6): the IRI, Babel's clique for it, and
+  IRIs whose label equals its label in any graph, each counted as subject and object in every
+  graph. `connections` (navigator N7): an entity's exact predicate histogram per graph, each
+  way, and for the 12 largest the classes of a sample of 100 far ends, or the `rdf:predicate`
+  of statements reached by `rdf:subject` or `rdf:object`. On DOID:2841 its second row is
+  `ASSOCIATES_DaG`, 465, Gene. A first draft named it `links`, guided mode's name: its tables
+  were taken for guided ones, and the model was shown `{}`.
+- A map runs `where` on each IRI start (once, when another start's lookup already found it),
+  and profiles each node with one bound fetch of `rdf:type`, or of `rdf:predicate` for
+  statements (`src/links.js`).
+- The card: where the start is (the graphs a path reads, then the four largest others and "N
+  more"); one line per path, a node named by its class when one class holds 95% of it ("465
+  Gene"), else counted by class ("3,108: 1,715 GeneSet, 1,393 Gene"); an `rdf:object`-in,
+  `rdf:subject`-out pair drawn as one link of statements; paths of one shape from IRIs in one
+  graph merged, their values counted again as a union; what a class step set aside; for ends
+  named alike in two graphs, IRIs and labels in common; the graphs holding the start that no
+  path reads; a CSV per end; every step and its tables under "Show every step".
+- The prompt: `where`, then `connections` in each graph that holds the start; a path in every
+  graph that links; statement pairs; a class step for a mixed node; "stop looking once you can
+  submit it" is gone.
+
+Checked against apps.okn.us with the asthma map written by hand (Haiku's two digcfdekg paths,
+spoke-okn's `ASSOCIATES_DaG`, rdkg's `related_to` kept to Gene, biomarkerkg's OBCI_1000008):
+one `where` (15 graphs, 40 identifiers, 11 by Babel and 28 by label), 18 tables, 6 s.
+spoke-okn 465 Gene; digcfdekg 4,316 statements to 3,108 values, 1,715 GeneSet set aside, 1,393
+Gene (the two traits' 1,222 and 762 merged); rdkg 94, 7 Disease set aside, 87 Gene; biomarkerkg
+627 risk biomarkers. Genes in common: spoke-okn and digcfdekg 228 by IRI and 223 by label;
+spoke-okn and rdkg none by IRI, 40 by label; digcfdekg and rdkg none, 32. The climate, NC and
+not_covered maps again, on the new card. Not checked: a model with the new prompt and
+operations; the CSV download, built and not clicked.
+
 ## 2. Measured (2026-09-24 to 2026-09-26, apps.okn.us, kgf 0.3.0)
 
 - Engine in the tab, one pattern (`describe` asthma, spoke-okn): 4 requests, 247 ms, release

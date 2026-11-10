@@ -3,6 +3,7 @@
 // click go through one function, land as one kind of table, and write one kind of log record.
 
 import { RECEIPT_SCHEMA, chunks, formatTerm, lookupLabels, query, readJson, runDirect, runFetch, runSparql, wireTerm } from './kgf.js';
+import { RDF_OBJECT, RDF_PREDICATE, RDF_SUBJECT, RDF_TYPE, cliqueOf, getJson, histogramOf, labelOf, link, presenceOf, rowsOf, skolem, valuesOf } from './links.js';
 import { TEMPLATES, iri, limit } from './templates.js';
 import { termsFromSql } from './terms.js';
 
@@ -19,6 +20,12 @@ const GRAPH = { type: 'string', description: 'A graph id from list_graphs.' };
 const LIMIT = { type: 'integer', minimum: 1, description: 'Maximum rows (default 200; at most the endpoint\'s max_output_rows).' };
 const TERM = (position, example) => ({ type: 'string', examples: [ example ], description: `The ${position}: ?name for a variable (it becomes a column), an IRI, or a quoted literal such as "20695" or "asthma"@en. Omit for an unnamed variable.` });
 const GRADES = [ 'asserted', 'external', 'sparql', 'bundle' ];
+// Client budgets for where and connections, named as budgets: identifiers counted across
+// graphs, graphs connections reads, predicates each way whose far ends it samples, and that sample's size.
+const WHERE_IRIS = 40;
+const LINK_GRAPHS = 8;
+const LINK_ENDS = 12;
+const END_SAMPLE = 100;
 const IRI = description => ({ type: 'string', description: `${description} An absolute IRI, as it appears in an earlier result.` });
 const DIRECTION = { type: 'string', enum: [ 'out', 'in' ], description: '"out" follows the predicate from the known node to the new one; "in" follows it backwards.' };
 const COUNT_TERM = (position, example) => ({ type: 'string', examples: [ example ], description: `The ${position}: an IRI, a quoted literal such as "20695" or "asthma"@en, or ?name to take the values bind gives it. Omit to match any ${position}.` });
@@ -328,6 +335,35 @@ export const TOOLS = [
     }),
   },
   {
+    name: 'where',
+    title: 'Where an entity is',
+    mapOnly: true,
+    description: 'Every graph that holds an entity, under each identifier for it: the IRI given; the identifiers Babel lists as the same thing (its clique); and IRIs labeled with the same words in any graph, which share a name and are not checked to be the same thing. Each row is one identifier in one graph, with the triples it is subject and object of there. Call it first on the thing a question is about: a graph may hold it only under another identifier (spoke-okn holds asthma as DOID:2841, other graphs as MONDO:0004979, digcfdekg as its own trait nodes).',
+    input_schema: schema({ iri: IRI('The entity.') }, [ 'iri' ]),
+    run: async(input, ctx) => {
+      const target = iri(input.iri, 'iri').slice(1, -1);
+      return runDirect({
+        operation: 'where', input, budget: ctx.budget, stop: ctx.stop,
+        call: (fetch, account) => whereRows({ endpoint: ctx.endpoint, target }, fetch, account),
+      });
+    },
+  },
+  {
+    name: 'connections',
+    title: 'Connections of an entity',
+    mapOnly: true,
+    description: `Everything that links one entity, in each graph that holds it, exactly: every predicate it has as subject (out) and as object (in), with its triple count, from each graph's own index. For the ${LINK_ENDS} largest each way, what is at the other end: the classes of a sample, or for statements reached by rdf:subject or rdf:object, their rdf:predicate. Use it to see how a thing connects before choosing a path; describe and incoming show only their first rows, which a large predicate can fill. Default graphs: those that hold the IRI, most triples first, up to ${LINK_GRAPHS}.`,
+    input_schema: schema({ iri: IRI('The entity.'), graphs: ANY_GRAPHS }, [ 'iri' ]),
+    run: async(input, ctx) => {
+      const target = iri(input.iri, 'iri').slice(1, -1);
+      const graphs = input.graphs?.length ? graphsOrAll(input.graphs, ctx.endpoint, 'count') : null;
+      return runDirect({
+        operation: 'connections', input, budget: ctx.budget, stop: ctx.stop,
+        call: (fetch, account) => linksRows({ endpoint: ctx.endpoint, target, graphs }, fetch, account),
+      });
+    },
+  },
+  {
     name: 'count',
     title: 'Count a pattern',
     description: 'The exact number of triples matching one pattern, from each graph\'s index, one request per graph. Any of subject, predicate, object may be left out. Without graphs every graph is asked, and only graphs with matches are kept: that says which graphs use a predicate or hold an IRI. With bind, a ?variable takes the distinct values of an earlier table\'s column, as in fetch, and each value gets its own count in each graph: subject "?x" bound to a column of IRIs says where each one is described, object "?x" where each one is pointed at. The result says how many values matched in no graph. Every value is answered by every graph asked, so for a large column narrow the graphs with terms first. Count before fetching anything that could be large.',
@@ -547,6 +583,9 @@ export const TOOLS = [
 ];
 
 export const TOOL_BY_NAME = new Map(TOOLS.map(t => [ t.name, t ]));
+
+/** Full mode's tools, which the gate's manifest signs: map mode's own operations are not among them (D19). */
+export const FULL_TOOLS = TOOLS.filter(t => !t.mapOnly);
 
 function lit(value) {
   return { type: 'literal', value: String(value) };
@@ -814,6 +853,174 @@ async function overlapOf({ endpoint, graphs }, fetch, account) {
       (skipped.size ? ` Skipped as shared vocabularies: ${[ ...skipped ].join(', ')}.` : ''),
     error: failureText(failures),
   };
+}
+
+/**
+ * `where`: the IRI, Babel's clique for it, and IRIs whose label equals its label in any graph,
+ * each counted as subject and object in every graph by bound `/count`s (navigator N5, N6).
+ */
+async function whereRows({ endpoint, target }, fetch, account) {
+  const how = new Map([ [ target, 'given' ] ]);
+  const failures = [];
+  if (endpoint.graphs.has('babel')) {
+    try {
+      for (const m of await cliqueOf(endpoint, fetch, target, WHERE_IRIS)) {
+        if (!how.has(m)) {
+          how.set(m, 'babel');
+        }
+      }
+    } catch (error) {
+      failures.push({ graph: 'babel', error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  const counted = graphsOrAll(null, endpoint, 'count');
+  const presence = new Map();
+  const count = async iris => {
+    failures.push(...await settleEach(counted, async graph => {
+      for (const [ i, entry ] of await presenceOf(endpoint, fetch, graph, iris)) {
+        presence.set(i, new Map([ ...presence.get(i) ?? [], [ graph, entry ] ]));
+      }
+    }));
+  };
+  await count([ ...how.keys() ].slice(0, WHERE_IRIS));
+  const holding = [ ...presence.get(target) ?? [] ].sort((a, b) => b[1].subject + b[1].object - (a[1].subject + a[1].object)).map(([ g ]) => g);
+  const label = holding.length ? await labelOf(endpoint, fetch, holding.slice(0, 3), target) : null;
+  if (label && how.size < WHERE_IRIS) {
+    const words = label.trim().toLowerCase();
+    const searched = graphsOrAll(null, endpoint, 'search');
+    const added = [];
+    failures.push(...await settleEach(searched, async graph => {
+      const search = async role => {
+        try {
+          return await getJson(fetch, link(endpoint, graph, 'search', { q: label, limit: 10, ...(role ? { role } : {}) }));
+        } catch (error) {
+          if (role && /not declared/u.test(error?.message ?? '')) {
+            return search(null);
+          }
+          throw error;
+        }
+      };
+      for (const r of (await search('label')).results ?? []) {
+        const same = [ r.label, r.match?.literal ].some(x => typeof x === 'string' && x.trim().toLowerCase() === words);
+        if (same && r.subject?.type === 'iri' && !skolem(r.subject.value) && !how.has(r.subject.value) && how.size < WHERE_IRIS) {
+          how.set(r.subject.value, 'same label');
+          added.push(r.subject.value);
+        }
+      }
+    }));
+    if (added.length) {
+      await count(added);
+    }
+  }
+  const rows = [];
+  for (const [ i, why ] of how) {
+    for (const [ graph, c ] of [ ...presence.get(i) ?? [] ].sort((a, b) => b[1].subject + b[1].object - (a[1].subject + a[1].object))) {
+      keepRow(account);
+      rows.push({ iri: { type: 'iri', value: i }, how: lit(why), graph: lit(graph), subjects: count0(c.subject), objects: count0(c.object) });
+    }
+  }
+  const graphs = [ ...new Set(rows.map(r => r.graph.value)) ];
+  const ids = [ ...new Set(rows.map(r => r.iri.value)) ];
+  const kinds = [ 'babel', 'same label' ].map(k => [ k, ids.filter(i => how.get(i) === k).length ]).filter(([ , n ]) => n);
+  return {
+    variables: [ 'iri', 'how', 'graph', 'subjects', 'objects' ],
+    rows,
+    graphs,
+    note: `${ids.length} identifier${ids.length === 1 ? '' : 's'} in ${graphs.length} graph${graphs.length === 1 ? '' : 's'}` +
+      (kinds.length ? ` (${kinds.map(([ k, n ]) => `${n} by ${k}`).join(', ')})` : '') +
+      (label ? `; label "${label}"` : '') +
+      (presence.has(target) ? '' : '; the IRI given is in no graph') +
+      (how.size > ids.length ? `; ${how.size - ids.length} identifiers found are in no graph` : ''),
+    error: failureText(failures),
+  };
+}
+
+/** "87 <iri>; 7 <iri>": a tally, largest first. */
+function tally(counts) {
+  return [ ...counts ].sort((a, b) => b[1] - a[1]).map(([ k, n ]) => `${n} ${k}`).join('; ');
+}
+
+/**
+ * `connections`: per graph, the entity's exact predicate histogram each way (navigator N7), and for
+ * the largest predicates the classes of a sample of what is at the other end.
+ */
+async function linksRows({ endpoint, target, graphs }, fetch, account) {
+  const failures = [];
+  let asked = graphs;
+  let others = [];
+  if (!asked) {
+    const totals = new Map();
+    failures.push(...await settleEach(graphsOrAll(null, endpoint, 'count'), async graph => {
+      for (const [ , c ] of await presenceOf(endpoint, fetch, graph, [ target ])) {
+        totals.set(graph, c.subject + c.object);
+      }
+    }));
+    const sorted = [ ...totals ].sort((a, b) => b[1] - a[1]).map(([ g ]) => g);
+    asked = sorted.slice(0, LINK_GRAPHS);
+    others = sorted.slice(LINK_GRAPHS);
+  }
+  const byGraph = new Map();
+  failures.push(...await settleEach(asked, async graph => {
+    const h = await histogramOf(endpoint, fetch, graph, target);
+    const rows = [];
+    for (const dir of [ 'out', 'in' ]) {
+      const entries = h.entries.filter(e => e.dir === dir).sort((a, b) => b.count - a.count);
+      for (const [ k, e ] of entries.entries()) {
+        let ends = null;
+        let example = null;
+        if (k < LINK_ENDS) {
+          const pattern = dir === 'out' ? { s: `<${target}>`, p: `<${e.predicate}>` } : { p: `<${e.predicate}>`, o: `<${target}>` };
+          const far = (await rowsOf(endpoint, fetch, graph, pattern, END_SAMPLE)).rows.map(r => (dir === 'out' ? r.o : r.s)).filter(Boolean);
+          example = far[0] ? wireTerm(far[0]) : null;
+          const iris = [ ...new Set(far.filter(t => t.type === 'iri' && !skolem(t.value)).map(t => t.value)) ];
+          const literals = far.filter(t => t.type === 'literal');
+          const counts = new Map();
+          const statements = dir === 'in' && (e.predicate === RDF_SUBJECT || e.predicate === RDF_OBJECT);
+          if (iris.length) {
+            const values = await valuesOf(endpoint, fetch, graph, iris, statements ? RDF_PREDICATE : RDF_TYPE);
+            for (const i of iris) {
+              for (const v of new Set((values.get(i) ?? []).filter(t => t.type === 'iri' && !skolem(t.value)).map(t => t.value))) {
+                counts.set(`<${v}>`, (counts.get(`<${v}>`) ?? 0) + 1);
+              }
+            }
+            const bare = iris.filter(i => !(values.get(i) ?? []).length).length;
+            if (bare) {
+              counts.set(statements ? 'with no rdf:predicate' : 'with no class', bare);
+            }
+          }
+          for (const t of literals) {
+            const kind = `literals${t.datatype ? ` ^^<${t.datatype}>` : t.lang ? ` @${t.lang}` : ''}`;
+            counts.set(kind, (counts.get(kind) ?? 0) + 1);
+          }
+          const sampled = iris.length + literals.length;
+          ends = `${sampled < e.count ? `${sampled} sampled of ${e.count.toLocaleString('en-US')}` : `all ${e.count.toLocaleString('en-US')}`}` +
+            `${statements ? ', statements by rdf:predicate' : ''}: ${tally(counts) || 'nothing'}`;
+        }
+        keepRow(account);
+        rows.push({
+          graph: lit(graph), direction: lit(dir), predicate: { type: 'iri', value: e.predicate }, triples: count(e.count),
+          ends: ends === null ? null : lit(ends), example,
+        });
+      }
+    }
+    byGraph.set(graph, { rows, h });
+  }));
+  const kept = asked.filter(g => byGraph.has(g));
+  return {
+    variables: [ 'graph', 'direction', 'predicate', 'triples', 'ends', 'example' ],
+    rows: kept.flatMap(g => byGraph.get(g).rows),
+    graphs: kept,
+    note: kept.map(g => {
+      const { h } = byGraph.get(g);
+      const n = dir => h.entries.filter(e => e.dir === dir).length;
+      return `${g}: ${n('out')} predicates out (${h.totals.out.toLocaleString('en-US')} triples), ${n('in')} in (${h.totals.in.toLocaleString('en-US')})${h.partial ? ', some predicates past the first 2,000 triples may be missing' : ''}`;
+    }).join('; ') + (others.length ? `. Also in, not read: ${others.join(', ')}` : '') + (kept.length ? '' : `. No graph holds ${target}`),
+    error: failureText(failures),
+  };
+}
+
+function count0(n) {
+  return count(n ?? 0);
 }
 
 /** The summary's namespace inventory, as a section for the Markdown card. */
