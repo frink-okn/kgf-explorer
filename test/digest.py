@@ -21,6 +21,12 @@ and the flags, which are what to look at first:
   no-link      the answer says graphs do not connect; says whether overlap was called on them
   own-words    the answer marks something as not from the graphs
   refused      the provider declined a turn
+
+In map mode (plan D19) the answer is the map the page showed, not the model's text, and:
+
+  no-map       the message ended without a map the page showed
+  map-back     the page sent a map back to the model (a start not in its graph, bad input)
+  dead-step    a shown map has a step that reached nothing, or did not run after one
 """
 
 import argparse
@@ -135,9 +141,23 @@ def headline(text: str) -> tuple[str, dict]:
         bits.append(f"bound {b.get('matched')}/{b.get('sent')} matched")
     if r.get("limit_reached"):
         bits.append("limit reached")
+    if r.get("shown"):
+        bits.append("map shown: " + map_text(r))
     if r.get("error"):
         bits.append(f"ERROR {clip(str(r['error']), 160)}")
     return " · ".join(bits) or clip(text, 120), r
+
+
+def map_text(r: dict) -> str:
+    """A shown map in a line: each path's start, then what each step reached."""
+    paths = []
+    for p in r.get("paths") or []:
+        start = str(p.get("start", "?")).rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+        if p.get("members") is not None:
+            start += f" ({p['members']})"
+        steps = [f"not run" if s.get("not_run") else f"{s.get('table')} {s.get('reached')} ({s.get('matched')})" for s in p.get("steps") or []]
+        paths.append(" → ".join([start] + steps))
+    return "; ".join(paths) or "no paths"
 
 
 def money(n: float) -> str:
@@ -185,7 +205,9 @@ def analyse(record: dict, args) -> list[dict]:
                 names.append(name)
                 key = name + json.dumps(inp, sort_keys=True)
                 inputs[key] = inputs.get(key, 0) + 1
-                for g in [inp.get("graph")] + list(inp.get("graphs") or []):
+                nested = [x for p in inp.get("paths") or [] if isinstance(p, dict)
+                          for x in [p.get("start") or {}] + list(p.get("steps") or []) if isinstance(x, dict)] if name == "map" else []
+                for g in [inp.get("graph")] + list(inp.get("graphs") or []) + [x.get("graph") for x in nested]:
                     if isinstance(g, str):
                         graphs.add(g)
                 if name == "overlap" and len(inp.get("graphs") or []) >= 2:
@@ -211,15 +233,29 @@ def analyse(record: dict, args) -> list[dict]:
                     flags.append(f"unmatched: {name} {b['unmatched']}/{b.get('sent')} lost, e.g. {clip(json.dumps(b.get('unmatched_sample', [])[:3], ensure_ascii=False), 120)}")
                 if len(text) > BIG:
                     flags.append(f"big-result: {name} {len(text):,} chars")
-        # The answer is the text of the last turn, if that turn called nothing.
+        # The answer is the text of the last turn, if that turn called nothing; in map mode, the
+        # map the page showed, since the model's text is never shown.
+        mapping = record.get("mode") == "map"
         answer = " ".join(turns[-1]["say"]) if turns and not turns[-1]["calls"] else ""
+        if mapping:
+            shown = [headline(results[c[0]][0])[1] for t in turns for c in t["calls"] if c[1] == "map" and c[0] in results]
+            back = [r for r in shown if not r.get("shown")]
+            shown = [r for r in shown if r.get("shown")]
+            answer = f"(map) {map_text(shown[-1])}" if shown else ""
+            if back:
+                flags.append(f"map-back: {len(back)} sent back; {clip(str(back[0].get('error')), 160)}")
+            if not shown and meta.get("outcome") not in ("stopped", "error"):
+                flags.append("no-map: ended without a map")
+            dead = [s for r in shown for p in r.get("paths") or [] for s in p.get("steps") or [] if s.get("not_run") or s.get("reached") == 0]
+            if dead:
+                flags.append(f"dead-step: {len(dead)} step{'s' if len(dead) > 1 else ''} reached nothing or did not run")
 
         calls = meta.get("calls") or []
         tool_count = len(names)
-        if tool_count == 0 and answer:
+        if tool_count == 0 and answer and not mapping:
             flags.insert(0, "no-tool: answered without calling a tool")
         cited = sorted(set(CITE.findall(answer)), key=lambda x: (x[0], int(x[1:])))
-        if answer and len(answer) > 300 and not any(c.startswith("t") for c in cited) and record.get("mode") != "guided":
+        if answer and len(answer) > 300 and not any(c.startswith("t") for c in cited) and record.get("mode") not in ("guided", "map"):
             flags.append("uncited: no table cited")
         ghosts = [c for c in cited if c.startswith("t") and c not in tables]
         if ghosts:
@@ -227,10 +263,10 @@ def analyse(record: dict, args) -> list[dict]:
         for key, n in inputs.items():
             if n > 1:
                 flags.append(f"repeat: {clip(key, 100)} ×{n}")
-        if NO_LINK.search(answer):
+        if NO_LINK.search(answer) and not mapping:
             pairs = [p for p in overlapped if p <= graphs] if len(graphs) >= 2 else []
             flags.append(f"no-link: says graphs do not connect; overlap {'was' if pairs else 'was not'} called on graphs it used ({', '.join(sorted(graphs)) or 'none named'})")
-        if OWN.search(answer):
+        if OWN.search(answer) and not mapping:
             flags.append(f"own-words: “{clip(OWN.search(answer).group(0), 40)}”")
         if any(c.get("stop") == "refusal" for c in calls):
             flags.append("refused: the provider declined a turn")

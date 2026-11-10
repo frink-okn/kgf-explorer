@@ -52,7 +52,7 @@ function maxOutputRows(endpoint) {
 }
 
 /** One position of a fetch pattern, in KGF request syntax. */
-function position(value, pos) {
+export function position(value, pos) {
   if (value === undefined || value === null || value === '') {
     return { variable: pos, text: `?${pos}` };
   }

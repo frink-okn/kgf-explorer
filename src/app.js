@@ -4,7 +4,8 @@
 
 import { GUIDED_BY_NAME, GUIDED_SYSTEM, GUIDED_TOOLS, guidedToolsFor } from './guided.js';
 import { Endpoint } from './kgf.js';
-import { DEFAULT_TURNS, PROVIDERS, createChat, failure } from './llm.js';
+import { DEFAULT_TURNS, ENDS, PROVIDERS, createChat, failure } from './llm.js';
+import { MAP_ROWS, MAP_SYSTEM, mapClosingNotice, mapLastTurnNote, mapTools, runMap } from './map.js';
 import { SYSTEM } from './prompt.js';
 import { linkTables, renderMarkdown } from './markdown.js';
 import { Sql } from './sql.js';
@@ -98,11 +99,14 @@ const state = {
   // The conversation as evidence (D18), and serve.py's recorder when the page is served by it.
   transcript: null,
   recorder: null,
-  // 'full' (every operation, for a strong model) or 'guided' (D16: handles, for a weaker one).
+  // 'full' (every operation, for a strong model), 'guided' (D16: handles, for a weaker one) or
+  // 'map' (D19: the model submits a map, and the page writes all the person reads).
   mode: 'full',
 };
 
+const MODES = [ 'full', 'guided', 'map' ];
 const guided = () => state.mode === 'guided';
+const mapMode = () => state.mode === 'map';
 const toolNamed = name => (guided() ? GUIDED_BY_NAME : TOOL_BY_NAME).get(name);
 
 function budget() {
@@ -155,9 +159,11 @@ async function connect() {
 
 function renderOperation() {
   const select = $('#op');
-  if (select.dataset.mode !== state.mode) {
+  // Map mode's buttons are full mode's: a map is the model's to submit.
+  const family = guided() ? 'guided' : 'full';
+  if (select.dataset.mode !== family) {
     select.replaceChildren(...(guided() ? GUIDED_TOOLS : TOOLS.filter(t => !t.llmOnly)).map(t => el('option', { value: t.name }, t.title)));
-    select.dataset.mode = state.mode;
+    select.dataset.mode = family;
   }
   const tool = toolNamed(select.value);
   $('#op-desc').textContent = tool.description;
@@ -256,7 +262,7 @@ function renderResults() {
         state.selected = t.id;
         renderResults();
       },
-    }, el('b', {}, t.id), ' ', t.operation, t.actor === 'assistant' ? el('span', { class: 'who' }, 'AI') : null));
+    }, el('b', {}, t.id), ' ', t.operation, t.actor === 'assistant' ? el('span', { class: 'who' }, 'AI') : t.actor === 'page' ? el('span', { class: 'who' }, 'map') : null));
   }
   tabs.append(el('button', { class: `tab ${state.selected === 'log' ? 'on' : ''}`, onclick: () => {
     state.selected = 'log';
@@ -288,7 +294,7 @@ function renderTable(table) {
     el('span', {}, `${r.totals.requests} requests${r.totals.bindings_requests ? ` (${r.totals.bindings_requests} with bindings)` : ''}`),
     el('span', {}, kib(r.totals.bytes)),
     el('span', {}, `${r.totals.elapsed_ms} ms`),
-    el('span', {}, table.actor === 'assistant' ? 'asked by the model' : 'run by you'),
+    el('span', {}, table.actor === 'assistant' ? 'asked by the model' : table.actor === 'page' ? 'run by the page for a map' : 'run by you'),
     table.graphs.length ? el('span', {}, table.graphs.join(' + ')) : null,
     table.labels?.requests ? el('span', { title: 'labels come from each graph\'s /labels, apart from this table\'s receipt' },
       `labels: ${[ ...table.labels.labels.values() ].filter(Boolean).length} of ${table.labels.labels.size} IRIs, ${table.labels.requests} request${table.labels.requests === 1 ? '' : 's'}`) : null,
@@ -394,7 +400,7 @@ function renderLog() {
       el('span', { class: `badge ${r.status}` }, r.status),
       el('b', {}, r.operation), ' ',
       el('code', {}, JSON.stringify(r.input)),
-      ' → ', r.table ?? (r.reads ? `read ${r.reads}` : '…'),
+      ' → ', r.table ?? (r.reads ? `read ${r.reads}` : r.tables ? `ran ${r.tables.join(', ')}` : '…'),
       el('span', { class: 'who2' }, r.actor)))));
 }
 
@@ -588,6 +594,115 @@ function waitingLine() {
   return line;
 }
 
+/** In map mode a call's chip names its graphs, not its input: the input is the model's text (D19). */
+function callGraphs(name, input) {
+  const graphs = input?.graphs?.length ? input.graphs : input?.graph ? [ input.graph ] : null;
+  if (graphs) {
+    return ` in ${graphs.join(', ')}`;
+  }
+  return [ 'count', 'terms' ].includes(name) ? ' in every graph' : name === 'read_table' && typeof input?.table === 'string' ? ` ${input.table}` : '';
+}
+
+/** A link to a table in the middle column. */
+function tableLink(id) {
+  return el('a', { href: '#', class: 'tref', onclick: event => {
+    event.preventDefault();
+    state.selected = id;
+    renderResults();
+  } }, id);
+}
+
+/** "a (3), b (2), and 4 more": graphs and their counts, largest first. */
+function graphCounts(counts, shown = 6) {
+  const sorted = [ ...counts ].sort((a, b) => b[1] - a[1]);
+  const text = sorted.slice(0, shown).map(([ g, c ]) => `${g} (${int(c)})`).join(', ');
+  return sorted.length > shown ? `${text}, and ${sorted.length - shown} more` : text;
+}
+
+/**
+ * A map as the page writes it (D19). Every line comes from a table the page ran for the map, a
+ * table the model listed as checked (described by its receipt), or a graph's label; the model's
+ * own text is never here.
+ */
+function mapCard(view) {
+  // A graph's label, else the IRI's last segment (shown as such, not bold), beside the IRI.
+  const named = (iri, label) => {
+    const short = shortIri(iri);
+    if (label) {
+      return [ el('b', {}, label), ' ', el('code', {}, short) ];
+    }
+    const local = /[#/]([^#/]+)$/u.exec(iri)?.[1];
+    return short === iri && local ? [ local, ' ', el('code', {}, iri) ] : [ el('code', {}, short) ];
+  };
+  const shownValue = ({ term, label }) => (term.type === 'iri' ? label ?? shortIri(term.value) : `“${term.value}”`);
+  const sub = (...children) => el('div', { class: 'map-sub' }, ...children);
+  const warn = (...children) => el('div', { class: 'map-sub warn' }, ...children);
+  const cap = Math.min(budget().maxRows || MAP_ROWS, MAP_ROWS);
+  const stopped = b => (b === 'max_rows' ? `stopped at ${int(cap)} rows, the map's budget` : `stopped at ${b}`);
+  const out = [ el('div', { class: 'map-head' }, view.outcome === 'found' ? 'Where the graphs hold this' : 'The graphs do not hold this') ];
+  if (view.outcome === 'not_covered' && view.paths.length) {
+    out.push(el('div', { class: 'map-sub' }, 'The nearest things they do hold:'));
+  }
+  for (const path of view.paths) {
+    const s = path.start;
+    const list = el('ol', { class: 'map-path' });
+    if (s.kind === 'iri') {
+      list.append(el('li', {}, ...named(s.iri, s.label), ` in ${s.graph}`,
+        sub([ s.subject.size ? `Subject in ${graphCounts(s.subject)}` : null, s.object.size ? `object in ${graphCounts(s.object)}` : null ].filter(Boolean).join('; '),
+          ' (triples) ', tableLink(s.tables[0]), ' ', tableLink(s.tables[1]))));
+    } else if (s.kind === 'class') {
+      list.append(el('li', {}, 'Members of ', ...named(s.iri, s.label), ` in ${s.graph}: ${int(s.count)}`, ' ', tableLink(s.tables[0]),
+        s.members.examples.length ? el('div', { class: 'map-ex' }, `e.g. ${s.members.examples.map(shownValue).join(', ')}${s.members.values > s.members.examples.length ? ', …' : ''}`) : null,
+        s.members.contract === 'complete' ? null :
+          warn(`The path follows the first ${int(s.members.values)}: ${s.members.error ?? stopped(s.members.budget)}. `, tableLink(s.members.table))));
+    } else {
+      list.append(el('li', {}, 'The value ', el('code', {}, s.text), ` in ${s.graph}: the object of ${int(s.count)} triples `, tableLink(s.tables[0])));
+    }
+    let graph = s.graph;
+    for (const step of path.steps) {
+      const where = step.graph === graph ? ` in ${step.graph}` : el('span', { class: 'map-cross' }, ` into ${step.graph}`);
+      const li = step.kind === 'class' ?
+        el('li', {}, 'only members of ', ...named(step.iri, step.label), where) :
+        el('li', {}, step.direction === 'out' ? '→ ' : '← ', ...named(step.iri, step.label), where);
+      graph = step.graph;
+      if (step.skipped) {
+        li.append(sub(`Not run: ${step.skipped}.`));
+        list.append(li);
+        continue;
+      }
+      const parts = step.kind === 'class' ?
+        [ `${int(step.reached)} of the ${int(step.sent)} value${step.sent === 1 ? '' : 's'} before it are members` ] :
+        [ `${int(step.triples)} triple${step.triples === 1 ? '' : 's'}, reaching ${int(step.reached)} distinct value${step.reached === 1 ? '' : 's'}` ];
+      if (step.kind !== 'class' && (step.sent > 1 || step.matched < step.sent)) {
+        parts.push(`${int(step.matched)} of the ${int(step.sent)} value${step.sent === 1 ? '' : 's'} before it matched`);
+      }
+      li.append(sub(parts.join('; '), ' ', tableLink(step.table)));
+      if (step.examples.length) {
+        li.append(el('div', { class: 'map-ex' }, `e.g. ${step.examples.map(shownValue).join(', ')}${step.reached > step.examples.length ? ', …' : ''}`));
+      }
+      if (step.error) {
+        li.append(warn(`Failed: ${step.error}`));
+      } else if (step.contract !== 'complete') {
+        li.append(warn(`Counts are lower bounds: ${stopped(step.budget)}` +
+          (step.checked < step.sent ? `, with ${int(step.sent - step.checked)} of the values before it not checked` : '') + '.'));
+      } else if (step.afterPartial) {
+        li.append(warn('Counts are lower bounds: a step before it stopped at a budget.'));
+      }
+      if (step.kind !== 'class' && step.matched < step.checked && step.unmatchedSample.length) {
+        li.append(warn(`${int(step.checked - step.matched)} found nothing here, e.g. `, el('code', {}, step.unmatchedSample.slice(0, 3).join('  '))));
+      }
+      list.append(li);
+    }
+    out.push(list);
+  }
+  if (view.checked.length) {
+    out.push(el('div', { class: 'map-sub' }, 'What was checked:'),
+      el('ul', { class: 'map-checked' }, view.checked.map(c => el('li', {}, c.text, ' ', tableLink(c.table)))));
+  }
+  out.push(el('div', { class: 'map-foot' }, 'Written by the page from the tables linked here and the graphs\' labels. The model chose what to look up and which paths to show; nothing it wrote is shown.'));
+  return out;
+}
+
 /** A reply is kept as its Markdown source and re-rendered as it streams, at most every 50 ms. */
 function reply() {
   const node = bubble('assistant');
@@ -646,8 +761,12 @@ async function send({ text = $('#prompt').value, case: label = null } = {}) {
   const calls = [];
   let current = null;
   let failed = null;
-  const tools = guided() ? guidedToolsFor(state.endpoint) : TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
-  const system = (guided() ? GUIDED_SYSTEM : SYSTEM)(state.endpoint.origin);
+  const tools = guided() ? guidedToolsFor(state.endpoint) : mapMode() ? mapTools() : TOOLS.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
+  const system = (guided() ? GUIDED_SYSTEM : mapMode() ? MAP_SYSTEM : SYSTEM)(state.endpoint.origin);
+  const offered = new Set(tools.map(t => t.name));
+  // Map mode (D19): the page shows only what it writes; a model's text goes to the transcript.
+  const quiet = mapMode();
+  let mapped = null;
   const maxTurns = Number($('#b-turns').value) || DEFAULT_TURNS;
   // Read per message, like the turns: a different effort is the same model, so the conversation stays.
   const effort = $('#effort').value || null;
@@ -664,6 +783,7 @@ async function send({ text = $('#prompt').value, case: label = null } = {}) {
       effort,
       // Guided mode answers only after looking: lfm2.5:8b and qwen3.5:9b wrote an omelet recipe otherwise.
       toolFirst: guided(),
+      lastTurn: quiet ? { note: mapLastTurnNote, notice: mapClosingNotice, only: [ 'map' ] } : undefined,
       signal: abort.signal,
       onTurnStart: () => {
         current = null;
@@ -672,6 +792,9 @@ async function send({ text = $('#prompt').value, case: label = null } = {}) {
       },
       onStatus: label => waiting.show(label),
       onText: delta => {
+        if (quiet) {
+          return;
+        }
         waiting.hide();
         current ??= reply();
         current.source += delta;
@@ -694,7 +817,31 @@ async function send({ text = $('#prompt').value, case: label = null } = {}) {
       },
       execute: async(name, input) => {
         waiting.hide();
-        const chip = bubble('tool', el('b', {}, name), ' ', el('code', {}, JSON.stringify(input)), ' …');
+        if (quiet && !offered.has(name)) {
+          return { error: `no operation named ${JSON.stringify(name)} here; the operations are ${[ ...offered ].join(', ')}` };
+        }
+        if (name === 'map') {
+          const chip = bubble('tool', 'The page is checking and running the map …');
+          const started = Date.now();
+          const result = await runMap(state.workspace, input, { budget: budget(), stop: abort.signal });
+          const summary = result.error ? { error: result.error } : result.forModel;
+          message.tools.push({
+            turn: message.calls.length - 1, name, table: null, ms: Date.now() - started, contract: result.error ? 'error' : 'complete',
+            rows: null, chars: JSON.stringify(summary).length, ran: result.tables ?? [],
+          });
+          if (result.error) {
+            // The reason is the page's; the map goes back to the model and nothing of it is shown.
+            chip.textContent = `The page sent the map back to the model: ${result.error}`;
+            return summary;
+          }
+          chip.remove();
+          mapped = result.view;
+          bubble('map', ...mapCard(result.view));
+          return { ...summary, [ENDS]: true };
+        }
+        const chip = quiet ?
+          bubble('tool', el('b', {}, name), callGraphs(name, input), ' …') :
+          bubble('tool', el('b', {}, name), ' ', el('code', {}, JSON.stringify(input)), ' …');
         current = null;
         const started = Date.now();
         const result = await state.workspace.run(name, input, { actor: 'assistant', budget: budget(), stop: abort.signal });
@@ -736,7 +883,11 @@ async function send({ text = $('#prompt').value, case: label = null } = {}) {
     message.error = failed ? String(failed.message ?? failed) : null;
     message.outcome = abort.signal.aborted ? 'stopped' : failed ? 'error' :
       message.calls.some(c => c.stop === 'refusal') ? 'refused' :
-        message.calls.some(c => c.tool_choice === 'none') ? 'closing' : 'answered';
+        quiet ? (mapped ? 'mapped' : 'unmapped') :
+          message.calls.some(c => c.tool_choice === 'none') ? 'closing' : 'answered';
+    if (message.outcome === 'unmapped') {
+      bubble('notice', 'The model ended without a map. Nothing it wrote is shown here; the transcript keeps it.');
+    }
     save();
     state.chatAbort = null;
     $('#send').disabled = false;
@@ -815,7 +966,8 @@ function init() {
     $(id).addEventListener('change', saveSettings);
   }
   $('#op').addEventListener('change', renderOperation);
-  state.mode = store.get('localStorage', 'kgf-explorer.mode') === 'guided' ? 'guided' : 'full';
+  const mode = store.get('localStorage', 'kgf-explorer.mode');
+  state.mode = MODES.includes(mode) ? mode : 'full';
   $('#mode').value = state.mode;
   $('#mode').addEventListener('change', () => {
     state.mode = $('#mode').value;

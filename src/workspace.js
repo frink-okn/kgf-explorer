@@ -123,6 +123,17 @@ export class Workspace extends EventTarget {
     return out;
   }
 
+  /**
+   * A log record for a step that is not one operation: a map (D19), whose tables the page ran
+   * through `run` as actor "page" and which names them.
+   */
+  record(entry) {
+    const record = { seq: this.log.length + 1, at: new Date().toISOString(), ...entry };
+    this.log.push(record);
+    this.changed({ record });
+    return record;
+  }
+
   exportLog() {
     return this.log.map(r => JSON.stringify(r)).join('\n') + '\n';
   }

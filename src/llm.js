@@ -25,6 +25,28 @@ function closingNotice(turns) {
   return `Reached ${turns} model turns for this message: the model is answering from what it has, with no more tools. ` +
     'Raise "model turns" in the budget, or reply "continue".';
 }
+
+/**
+ * Set on what `execute` returns when that call ends the message: no model turn follows it
+ * (a map, D19). A symbol key, so it never reaches the model's JSON.
+ */
+export const ENDS = Symbol('ends the message');
+
+/**
+ * How a message's last allowed turn goes (D10): with tools off and the full-mode note, or as
+ * `h.lastTurn` says — its note and notice, and `only`, the tools that still run. Those keep
+ * every tool in the request (a different list would miss the cache) and run only `only`.
+ */
+function lastTurn(h, turns) {
+  return {
+    note: h.lastTurn?.note(turns) ?? lastTurnNote(turns),
+    notice: h.lastTurn?.notice(turns) ?? closingNotice(turns),
+    only: h.lastTurn?.only ?? null,
+  };
+}
+
+/** A call the last turn does not run, answered so the history stays whole. */
+const NOT_RUN = { error: 'Not run: this was the last turn, and only the tools it names run.' };
 // Models that take Anthropic's server-side refusal fallback (`fallbacks: "default"`).
 const FALLBACK_MODELS = new Set([ 'claude-opus-5', 'claude-fable-5-1' ]);
 
@@ -82,7 +104,7 @@ function meterOpenAI(response, model) {
 
 export function createChat({ provider, apiKey, model, baseURL, mode }) {
   if (provider === 'gate') {
-    if (mode === 'guided') {
+    if (mode !== 'full') {
       throw new Error('The free model runs in full mode only: the gate takes only the prompt and operations this build signed, which are full mode\'s.');
     }
     return new GateChat({ base: baseURL || PROVIDERS.gate.base });
@@ -113,7 +135,10 @@ export function createChat({ provider, apiKey, model, baseURL, mode }) {
  *   onCall(record)           — one model call for the transcript (D18): turn, ms, model, stop
  *                              reason, tool_choice, usage; what a refusal cut off; or the error
  *   maxTurns                — model calls this message may make, the last with tools off
+ *   lastTurn                 — optional { note(turns), notice(turns), only }: the last turn
+ *                              keeps its tools and runs only those named in `only` (D19)
  *   toolFirst                — the message's first turn must call a tool (guided mode, D16)
+ * A result `execute` marks with ENDS ends the message once that turn's results are in.
  *   signal                   — aborts the whole exchange
  */
 class AnthropicChat {
@@ -124,18 +149,21 @@ class AnthropicChat {
   }
 
   async send(text, h) {
-    this.messages.push({ role: 'user', content: text });
+    // A message that ended on a tool call (a map, D19) left the results as the last user turn;
+    // the next message's text joins that turn, since turns must alternate.
+    this.appendNote(text);
     const tools = h.tools.map(t => ({ name: t.name, description: t.description, input_schema: t.input_schema, eager_input_streaming: true }));
     const maxTurns = Math.max(1, h.maxTurns ?? DEFAULT_TURNS);
+    const last = lastTurn(h, maxTurns);
     let jsonRetries = 0;
     let closing = false;
     for (let turn = 0; ; turn++) {
       if (!closing && turn >= maxTurns - 1) {
         closing = true;
-        this.appendNote(lastTurnNote(maxTurns));
-        h.onNotice(closingNotice(maxTurns));
+        this.appendNote(last.note);
+        h.onNotice(last.notice);
       }
-      const choice = closing ? { type: 'none' } : h.toolFirst && turn === 0 ? { type: 'any' } : null;
+      const choice = closing && !last.only ? { type: 'none' } : h.toolFirst && turn === 0 ? { type: 'any' } : null;
       // cache_control caches the conversation so far at each call, and the next call reads it
       // back: a full-mode question is 10–33 calls over one growing prefix (§3 item 4).
       const params = {
@@ -183,7 +211,7 @@ class AnthropicChat {
         continue;
       }
       const uses = message.content.filter(b => b.type === 'tool_use');
-      if (uses.length === 0 || closing) {
+      if (uses.length === 0 || (closing && !last.only)) {
         this.messages.push({ role: 'assistant', content: message.content });
         return;
       }
@@ -192,11 +220,14 @@ class AnthropicChat {
       }
       this.messages.push({ role: 'assistant', content: message.content });
       // Every result of one turn goes back in a single user message.
-      const results = await Promise.all(uses.map(async use => {
-        const out = await runTool(h, use.name, use.input);
-        return { type: 'tool_result', tool_use_id: use.id, content: JSON.stringify(out.value), is_error: out.error };
+      const outs = await Promise.all(uses.map(async use => {
+        const out = closing && !last.only.includes(use.name) ? { value: NOT_RUN, error: true } : await runTool(h, use.name, use.input);
+        return { out, block: { type: 'tool_result', tool_use_id: use.id, content: JSON.stringify(out.value), is_error: out.error } };
       }));
-      this.messages.push({ role: 'user', content: results });
+      this.messages.push({ role: 'user', content: outs.map(o => o.block) });
+      if (closing || outs.some(o => o.out.ends)) {
+        return;
+      }
     }
   }
 
@@ -228,14 +259,15 @@ class OpenAIChat {
     this.messages.push({ role: 'user', content: text });
     const tools = h.tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
     const maxTurns = Math.max(1, h.maxTurns ?? DEFAULT_TURNS);
+    const last = lastTurn(h, maxTurns);
     for (let turn = 0; ; turn++) {
       const closing = turn >= maxTurns - 1;
       if (closing) {
-        this.messages.push({ role: 'user', content: lastTurnNote(maxTurns) });
-        h.onNotice(closingNotice(maxTurns));
+        this.messages.push({ role: 'user', content: last.note });
+        h.onNotice(last.notice);
       }
       h.onTurnStart();
-      const choice = closing ? 'none' : h.toolFirst && turn === 0 ? 'required' : null;
+      const choice = closing && !last.only ? 'none' : h.toolFirst && turn === 0 ? 'required' : null;
       const started = Date.now();
       let response;
       try {
@@ -259,7 +291,7 @@ class OpenAIChat {
       if (message.content) {
         h.onText(message.content);
       }
-      if (closing) {
+      if (closing && !last.only) {
         // Some servers ignore tool_choice "none"; a tool call no one will answer must not stay in the history.
         this.messages.push({ role: 'assistant', content: message.content ?? '' });
         return;
@@ -269,6 +301,7 @@ class OpenAIChat {
       if (calls.length === 0) {
         return;
       }
+      let ends = false;
       const results = await Promise.all(calls.map(async call => {
         let input;
         try {
@@ -276,10 +309,14 @@ class OpenAIChat {
         } catch {
           return { role: 'tool', tool_call_id: call.id, content: JSON.stringify({ error: 'arguments were not valid JSON' }) };
         }
-        const out = await runTool(h, call.function.name, input);
+        const out = closing && !last.only.includes(call.function.name) ? { value: NOT_RUN } : await runTool(h, call.function.name, input);
+        ends ||= out.ends;
         return { role: 'tool', tool_call_id: call.id, content: JSON.stringify(out.value) };
       }));
       this.messages.push(...results);
+      if (closing || ends) {
+        return;
+      }
     }
   }
 }
@@ -545,7 +582,7 @@ export function failure(error) {
 async function runTool(h, name, input) {
   try {
     const value = await h.execute(name, input);
-    return { value, error: value?.contract === 'error' || Boolean(value?.error && !value?.contract) };
+    return { value, error: value?.contract === 'error' || Boolean(value?.error && !value?.contract), ends: Boolean(value?.[ENDS]) };
   } catch (error) {
     return { value: { error: error instanceof Error ? error.message : String(error) }, error: true };
   }

@@ -419,6 +419,69 @@ method, so the difference is not the changes' alone.
   budget. The schemas say `additionalProperties: false` and the page does not check. Refusing
   an input a tool does not take, by name, would have cost one call.
 
+**D19. Map mode: where the graphs hold a question, never an answer** (proposed and prototyped
+2026-11-10). A third mode, toward a public page that shows no text the graphs do not back. In
+full mode the prose around a citation is the model's, and D15 holds only as far as a prompt
+line does: gpt-oss-120b's "100 distinct court entities" cited t8, 100 IRIs under
+`scales#Court/`, for SCALES's 94 courts; Qwen wrote the omelet recipe (D15 note). Ending on a
+table instead would still let the model pick the wrong one, and `sql` writes any text into a
+cell: `SELECT 'Take aspirin daily' AS answer` is a table. So the mode claims less: where the
+OKN holds what a question is about, and how those things connect, every count the page's. In
+§2's three cross-graph runs on Qwen the link was in hand early: securechainkg's use of
+climatemodelskg's Sources at tool call 9 of 29, DTXSID IRIs in both PFAS graphs at 12 of 74,
+the ZIP key named in medical-device-kg's schema within the first 8 of 54. The rest was the
+join and its judgment, and in the NC run that is where two runs found different 14s.
+- The model explores with full mode's operations, less `sql`, and ends by calling `map`
+  (`src/map.js`): paths, each from a start (an entity's IRI, a value, or a class's members, in
+  one graph) through steps of one predicate in one graph, or of one class whose members it
+  keeps. A step in another graph than the one before carries the values across: IRIs the two
+  graphs share, or values stored alike (a ZIP). Or `not_covered`, with the tables that show
+  what was checked.
+- The page checks each start is in its graph; a map that fails goes back to the model as an
+  error and nothing is shown. Then it runs each path through `Workspace.run` as actor `page`:
+  a class's members by `fetch`, each step a bound `fetch` of the values before it. A step
+  reports its triples, the distinct values it reached, and how many of the values sent matched
+  (D8). A map step keeps at most 20,000 rows, a client budget (composer's `ROW_CAP`), inside
+  the visitor's (D10); a step that reaches it says its counts are lower bounds. An IRI start is
+  counted as subject and object in every graph, so the card says where else it is (navigator
+  N5).
+- The person sees the map card, written by the page from those tables and the graphs' labels.
+  What the model writes is never rendered; it stays in the transcript (D18). Tool chips name the
+  operation and the graphs, not the input. A map ends the message: no model turn follows it.
+  The last allowed turn (D10) keeps the tools and runs only `map`.
+- A transcript's outcome is `mapped` or `unmapped`. `test/digest.py` reads the map as the
+  answer and flags `no-map`, `map-back` and `dead-step`.
+- Not for the gate, whose manifest signs full mode's prompt and tools (`gate-manifest.js`).
+- Not stated by a path: a join that needs a rewrite (SAWGraph's DTXSID IRIs against ToxCast's,
+  undashed CAS numbers). Not built: a composer link per path, the notebook (§3 item 3).
+
+*Checked the same day,* against apps.okn.us, with `test/fake_llm.py` submitting hand-written
+maps (a question that starts `map:`); no model:
+- Climate: climatemodelskg's 394 Sources → `dependsOn` into securechainkg, 3 of 394 matched,
+  23 triples to 18 packages → `hasSoftwareVersion`, 12 of 18, 2,840 versions →
+  `vulnerableTo`, 2,408 of 2,840, 6,824 triples to 35 CVEs. §2's and D18's numbers.
+- Asthma (DOID:2841) → `ASSOCIATES_DaG`: 465 genes. Its presence: subject of 28,218 triples
+  and object of 27,755 in spoke-okn, navigator N6's 55,973. The liver (UBERON:0002107) ←
+  part of: 91. SCALES's `jxdm:Court`: 94.
+- NC: `"NC"` ← `state` in medical-device-kg reaches 13,169 things of every kind, hence the class
+  step. Kept to `RegistrationListingRecord`: 313 (§2), 141 ZIPs, 132 of them in sudokn by
+  `schema:postalCode`, 790 locations of 692 organizations. Not §2's 131 ZIPs, which counted
+  NC manufacturers only.
+- The loop: a map ends the message, 2 model calls for list_graphs then map; text with an
+  `<img onerror>` beside every call never rendered. A start in no graph went back to the model
+  with the page's reason, and the next map showed. A not_covered map listed "Searched bio101
+  for “omelet”: no hits". The last allowed turn kept the tools, sent the note and ran the map.
+  A second message in the same conversation ran. The Anthropic adapter against a stubbed
+  stream: two calls, not three; the next message's text joins the tool-result turn, so roles
+  alternate; the last turn sends both tools and no `tool_choice`, and answers `search` "not
+  run"; full mode's last turn is still `tool_choice: none`.
+- Past the map's budget: securechainkg's `SoftwareVersion`, 8,593,149 members, followed for its
+  first 20,000 in 7 s, and each step after it marked as lower bounds.
+- An IRI start costs two counts over every graph, 94 requests at 47 graphs.
+- Not checked: a model. None was at hand, and the gate does not take this mode. The suite in
+  map mode (`?queue`) is the next run: a case passes when its map holds the graphs, IRIs and
+  link the case needs, and a guard when it ends in `not_covered`.
+
 ## 2. Measured (2026-09-24 to 2026-09-26, apps.okn.us, kgf 0.3.0)
 
 - Engine in the tab, one pattern (`describe` asthma, spoke-okn): 4 requests, 247 ms, release
