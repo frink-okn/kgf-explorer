@@ -23,6 +23,22 @@ Open http://127.0.0.1:8765/. The endpoint defaults to https://apps.okn.us/kgf. `
 does not work, and a plain static server can hide a rebuild behind a cached `index.html`,
 which `serve.py` prevents. To deploy, publish `dist/`.
 
+### The free model
+
+The provider "Free — RENCI's Qwen through the FRINK gate" needs no key: it goes through
+[frink-llm-gate](../frink-llm-gate), which holds the model's key and runs only the prompt and
+operations a build signed. The build signs them when it has the signing key, which is never in
+this repository:
+
+```sh
+KGF_GATE_KEY=<file holding the build's Ed25519 seed> ./build.sh   # writes dist/gate-manifest.txt
+```
+
+`KGF_GATE_KEY_ID` names the key (`build1` by default), and `KGF_GATE_URL` the gate (the
+development gate's `http://127.0.0.1:8787` by default). Without the key the build says so and
+the free model is off. For development, the gate's `tools/dev_run.sh` with no question keeps a
+gate up for the page, and its `dev/build-key` is the key that gate trusts.
+
 ## Layout
 
 | file | what it is |
@@ -33,13 +49,17 @@ which `serve.py` prevents. To deploy, publish `dist/`.
 | `src/sql.js` | DuckDB-Wasm over the session's tables, locked down |
 | `src/terms.js` | terms in table columns, as kgfq stores them |
 | `src/workspace.js` | the session: tables, log, labels, what the model sees of a result |
-| `src/llm.js` | the chat loop: Anthropic's SDK and the OpenAI chat-completions shape |
+| `src/llm.js` | the chat loop: Anthropic's SDK, the OpenAI chat-completions shape, and the FRINK gate |
+| `src/prompt.js` | the full-mode prompt and the last-turn note, which the page sends and the build signs |
+| `gate-manifest.js` | writes and signs the gate's manifest from `src/prompt.js` and `src/tools.js`, at build time |
+| `src/sha256.js`, `src/pow-worker.js` | the gate's proof of work, in a worker |
 | `src/transcript.js` | a conversation kept as evidence: prompt, tools, every model call, what each result showed the model, receipts |
 | `src/markdown.js` | replies as sanitized Markdown |
 | `src/app.js`, `index.html` | the page |
 | `test/fake_llm.py` | a stand-in OpenAI-compatible model endpoint for testing the chat without a key |
 | `test/meter_llm.py` | a metering proxy in front of a real OpenAI-compatible model server |
 | `test/digest.py` | reads transcripts: a trace of each message, and flags to look at first |
+| `test/pow_check.mjs` | checks the proof of work against Node's crypto and the gate's own vector |
 | `test/questions.jsonl`, `test/enqueue.py` | cases with measured answers, and the queue the page runs with `?queue` |
 
 ## Testing the chat without a key

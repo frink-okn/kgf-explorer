@@ -6,27 +6,20 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 
+import { lastTurnNote } from './prompt.js';
+
 export const PROVIDERS = {
   // efforts: the levels `output_config.effort` takes; unset, each model uses its own default.
   anthropic: { label: 'Anthropic — Claude API key', model: 'claude-opus-5', keyHint: 'sk-ant-…', efforts: [ 'low', 'medium', 'high', 'xhigh', 'max' ] },
   openai: { label: 'OpenAI — API key', base: 'https://api.openai.com/v1', model: '', keyHint: 'sk-…' },
   openrouter: { label: 'OpenRouter — one key, many models', base: 'https://openrouter.ai/api/v1', model: '', keyHint: 'sk-or-…' },
   custom: { label: 'OpenAI-compatible — custom URL', base: 'http://localhost:11434/v1', model: '', keyHint: 'often unused locally' },
+  // No key: the gate holds the model's, and the model is the one its signed manifest names.
+  gate: { label: 'Free — RENCI\'s Qwen through the FRINK gate', base: KGF_GATE_URL || 'http://127.0.0.1:8787', model: '', keyless: true },
 };
 
 // Model calls one message may make; the page's budget panel sets it per send.
 export const DEFAULT_TURNS = 50;
-
-/**
- * What the last allowed turn is told. It runs with tools switched off, so a message that
- * reaches the limit ends in an answer from what arrived — the same contract as the fetch
- * budgets: stop, keep what came, say why — rather than in an error.
- */
-function lastTurnNote(turns) {
-  return `This is the last of the ${turns} model turns this page allows for one message. ` +
-    'Do not call any more tools. Answer now from the tables you have, say plainly what you did not get to, ' +
-    'and name the tables your answer rests on.';
-}
 
 function closingNotice(turns) {
   return `Reached ${turns} model turns for this message: the model is answering from what it has, with no more tools. ` +
@@ -87,7 +80,13 @@ function meterOpenAI(response, model) {
   };
 }
 
-export function createChat({ provider, apiKey, model, baseURL }) {
+export function createChat({ provider, apiKey, model, baseURL, mode }) {
+  if (provider === 'gate') {
+    if (mode === 'guided') {
+      throw new Error('The free model runs in full mode only: the gate takes only the prompt and operations this build signed, which are full mode\'s.');
+    }
+    return new GateChat({ base: baseURL || PROVIDERS.gate.base });
+  }
   if (provider === 'anthropic') {
     if (!apiKey) {
       throw new Error('Enter an Anthropic API key under "Model" first. It is sent only to api.anthropic.com.');
@@ -106,6 +105,8 @@ export function createChat({ provider, apiKey, model, baseURL }) {
  *   execute(name, input)     — runs one operation; resolves to what the model should see
  *   onText(delta)            — streamed assistant text
  *   onTurnStart()            — a new model turn began
+ *   onStatus(label)          — what the wait is for, when the adapter knows more than that a
+ *                              turn began (the gate's visitor token, the model thinking)
  *   onNotice(text)           — something the person should see that is not the model's text
  *   onUsage(call)            — one model call's tokens (model, input, cacheWrite, cacheRead,
  *                              output) and cost, null where no price is listed
@@ -279,6 +280,240 @@ class OpenAIChat {
         return { role: 'tool', tool_call_id: call.id, content: JSON.stringify(out.value) };
       }));
       this.messages.push(...results);
+    }
+  }
+}
+
+const PROBLEM = 'urn:frink-llm-gate:problem:';
+
+/** An error from the gate, from its problem document (RFC 9457): its words, its status, its type. */
+class GateError extends Error {
+  constructor(problem, status) {
+    super(`The gate: ${problem?.title ?? `HTTP ${status}`}${problem?.detail ? ` — ${problem.detail}` : ''}`);
+    this.status = problem?.status ?? status;
+    this.problem = typeof problem?.type === 'string' && problem.type.startsWith(PROBLEM) ? problem.type.slice(PROBLEM.length) : null;
+  }
+}
+
+/** The events of a server-sent stream, as { event, data }, with data parsed as JSON. */
+async function* events(body) {
+  const reader = body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) {
+      return;
+    }
+    buffer += value.replaceAll('\r\n', '\n');
+    for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
+      const block = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      let event = 'message';
+      let data = '';
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) {
+          event = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          data += line.slice(5).replace(/^ /u, '');
+        }
+      }
+      if (data) {
+        yield { event, data: JSON.parse(data) };
+      }
+    }
+  }
+}
+
+/**
+ * The free model, through the FRINK gate (frink-llm-gate): no key. The gate holds the model's
+ * key, asks a proof of work for a visitor token (solved in a worker), and runs only the prompt
+ * and operations this build signed into gate-manifest.txt, beside the page. It keeps no
+ * conversation: each turn comes back with the conversation sealed, which goes back with the next
+ * input. It sets the model, the reply cap and the turns a message may take, and on a message's
+ * last turn sends the build's last-turn note itself, so `h.system`, `h.tools` and `h.maxTurns`
+ * are not sent; `h.endpoint` is, as the prompt's one parameter.
+ */
+class GateChat {
+  constructor({ base }) {
+    this.base = base.replace(/\/+$/u, '');
+    // The conversation as the gate holds it, sealed; and, for the transcript only (D18), as the
+    // gate sends it to the model, in chat-completions messages, kept here since the page cannot
+    // read the sealed one.
+    this.conversation = null;
+    this.messages = [];
+    // The sealed conversation as it stood after the last answer, where every message starts.
+    this.answered = null;
+    this.token = null;
+    this.tokenUntil = 0;
+    this.signed = null;
+  }
+
+  /** The signed manifest beside the page, and the model it names. */
+  async manifest() {
+    if (!this.signed) {
+      const response = await fetch('gate-manifest.txt', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error('This build has no signed manifest for the gate (gate-manifest.txt), so the free model is off. Build with KGF_GATE_KEY set.');
+      }
+      const text = (await response.text()).trim();
+      const body = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(text.split('.')[3].replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0))));
+      this.signed = { text, model: body.ask.model };
+    }
+    return this.signed;
+  }
+
+  async post(path, body, { token, signal } = {}) {
+    const headers = { 'content-type': 'application/json' };
+    if (token) {
+      headers.authorization = `Bearer ${token}`;
+    }
+    const response = await fetch(`${this.base}${path}`, { method: 'POST', headers, body: JSON.stringify(body), signal });
+    if (!response.ok) {
+      const problem = await response.json().catch(() => null);
+      throw new GateError(problem, response.status);
+    }
+    return response;
+  }
+
+  /** A visitor token: a challenge, solved in a worker, traded. Kept until shortly before it lapses. */
+  async visitorToken(signal, onStatus) {
+    if (this.token && Date.now() < this.tokenUntil) {
+      return this.token;
+    }
+    onStatus?.('Getting a visitor token: a moment of work in this browser');
+    const challenge = await (await this.post('/v1/challenge', { automation: navigator.webdriver === true }, { signal })).json();
+    const worker = new Worker(`pow-worker.js?v=${KGF_EXPLORER_BUILD}`);
+    const stop = () => worker.terminate();
+    signal?.addEventListener('abort', stop, { once: true });
+    let solved;
+    try {
+      solved = await new Promise((resolve, reject) => {
+        worker.onmessage = ({ data }) => resolve(data);
+        worker.onerror = event => reject(new Error(`The proof of work failed: ${event.message}`));
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        worker.postMessage({ challenge: challenge.challenge, difficulty: challenge.difficulty });
+      });
+    } finally {
+      stop();
+      signal?.removeEventListener('abort', stop);
+    }
+    const issued = await (await this.post('/v1/token', { challenge: challenge.challenge, nonce: solved.nonce }, { signal })).json();
+    this.token = issued.token;
+    this.tokenUntil = Date.now() + Math.max(0, issued.expires_in - 60) * 1000;
+    this.work = { bits: challenge.difficulty, tries: solved.tries, ms: solved.ms };
+    return this.token;
+  }
+
+  async send(text, h) {
+    const manifest = await this.manifest();
+    // A message that failed or was stopped midway left the gate's conversation waiting for
+    // results it will never get, and the gate would refuse text after it: start from the last
+    // answer instead. The page's own copy keeps that message, so the transcript shows what ran,
+    // and this message's first call says the model was not shown it.
+    const resumed = this.conversation !== this.answered;
+    this.conversation = this.answered;
+    if (this.messages.length === 0) {
+      this.messages.push({ role: 'system', content: h.system });
+    }
+    this.messages.push({ role: 'user', content: text });
+    let input = { text };
+    let retries = 0;
+    for (let turn = 0; ; turn++) {
+      const token = await this.visitorToken(h.signal, h.onStatus);
+      h.onTurnStart();
+      const started = Date.now();
+      const record = {
+        turn, model: manifest.model, ...(this.work ? { work: this.work } : {}),
+        ...(resumed && turn === 0 ? { resumed_from_last_answer: true } : {}),
+      };
+      this.work = null;
+      const calls = [];
+      let done = null;
+      let problem = null;
+      let said = '';
+      let reasoning = '';
+      try {
+        const response = await this.post('/v1/turn', {
+          manifest: manifest.text, params: { endpoint: h.endpoint }, transcript: this.conversation, input,
+        }, { token, signal: h.signal });
+        for await (const { event, data } of events(response.body)) {
+          if (event === 'text') {
+            said += data.delta;
+            h.onText(data.delta);
+          } else if (event === 'reasoning') {
+            if (!reasoning) {
+              h.onStatus?.('The model is thinking');
+            }
+            reasoning += data.delta;
+          } else if (event === 'tool_call') {
+            calls.push(data);
+          } else if (event === 'done') {
+            done = data;
+          } else if (event === 'problem') {
+            problem = data;
+          }
+        }
+        if (problem) {
+          throw new GateError(problem, problem.status);
+        }
+        if (!done) {
+          throw new Error('The gate\'s stream ended without the turn.');
+        }
+      } catch (error) {
+        h.onCall?.({ ...record, ms: Date.now() - started, ...failure(error), ...(error.problem ? { problem: error.problem } : {}) });
+        if (h.signal?.aborted || retries >= 2) {
+          throw error;
+        }
+        if (error.problem === 'expired' || error.problem === 'not-the-gates') {
+          // A token that lapsed, or one from before the gate's keys changed: get another.
+          this.token = null;
+        } else if (error.problem === 'turn-refused') {
+          // The gate kept nothing of the turn: the same input goes again.
+          h.onNotice('The gate refused the model\'s turn (a tool call it does not allow there); asking again.');
+        } else {
+          throw error;
+        }
+        retries++;
+        turn--;
+        continue;
+      }
+      retries = 0;
+      const usage = done.usage ? {
+        model: manifest.model, input: done.usage.prompt, cacheWrite: 0, cacheRead: 0, output: done.usage.completion, cost: null, long: false,
+      } : null;
+      if (usage) {
+        h.onUsage?.(usage);
+      }
+      h.onCall?.({
+        ...record, ms: Date.now() - started, stop: done.finish, usage, reasoning_chars: reasoning.length,
+        ...(done.turns_left === undefined ? {} : { turns_left: done.turns_left }),
+      });
+      this.conversation = done.transcript;
+      this.messages.push({
+        role: 'assistant', content: said || null, ...(reasoning ? { reasoning } : {}),
+        ...(calls.length ? { tool_calls: calls.map(call => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } })) } : {}),
+      });
+      if (calls.length === 0) {
+        this.answered = this.conversation;
+        return;
+      }
+      const results = await Promise.all(calls.map(async call => {
+        let input;
+        try {
+          input = JSON.parse(call.arguments || '{}');
+        } catch {
+          return { id: call.id, content: JSON.stringify({ error: 'arguments were not valid JSON' }) };
+        }
+        const out = await runTool(h, call.name, input);
+        return { id: call.id, content: JSON.stringify(out.value) };
+      }));
+      this.messages.push(...results.map(result => ({ role: 'tool', tool_call_id: result.id, content: result.content })));
+      if (done.turns_left === 1) {
+        // The gate adds the build's last-turn note to the next request, after these results.
+        this.messages.push({ role: 'user', content: lastTurnNote() });
+        h.onNotice('The next model turn is the last the gate allows for this message: the model answers from what it has, with no more tools. Reply "continue" to go on.');
+      }
+      input = { results };
     }
   }
 }

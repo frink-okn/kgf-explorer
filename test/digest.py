@@ -37,7 +37,8 @@ NO_LINK = re.compile(
     re.I,
 )
 OWN = re.compile(r"not from the graphs|my own knowledge|general knowledge|outside the graphs|made up", re.I)
-CLOSING = "This is the last of the "
+# The last-turn note: with a count from the page's own adapters, without one from the gate's.
+CLOSING = ("This is the last of the ", "This is the last model turn ")
 BIG = 20_000
 
 

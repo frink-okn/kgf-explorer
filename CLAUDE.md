@@ -17,6 +17,9 @@ before changing anything, and the decision (D1–D15) a change touches.
   `python3 test/digest.py runs/` reads them. Changes to prompts, tools or what the page asks of
   KGF cite runs, not impressions. `runs/` is never committed.
 - `dist/` is built, never edited or committed.
+- `KGF_GATE_KEY=<seed file>` signs the FRINK gate's manifest into `dist/gate-manifest.txt`
+  (`gate-manifest.js`, from `src/prompt.js` and `src/tools.js`); without it the free model is
+  off. The key is never in this repo. The gate's design and plans live in `../frink-llm-gate`.
 
 ## Tests: real servers, never mocks
 
